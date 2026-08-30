@@ -34,7 +34,10 @@ positive for the displayed `Cl_KJ=2 Gamma/U` convention.
 Pressure is reconstructed from the velocity-gradient pressure Poisson source,
 with homogeneous wall-normal pressure derivative and zero outer reference.
 The GUI performs cached inverse-map interpolation into a physical Cartesian
-raster and uses Qt-native painting for the airfoil and Cp curves.
+raster and uses Qt-native painting for the airfoil and Cp curves.  The bottom
+chart overlays the recovered viscous surface pressure (solid) with the
+analytical inviscid Kutta--Joukowski profile (dashed) for the same geometry and
+angle of attack.
 
 Known limitations are the finite (regularized) trailing edge, approximate wall
 vorticity closure, finite outer boundary, and the severe explicit viscous CFL

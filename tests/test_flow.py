@@ -1,6 +1,11 @@
 import numpy as np
 from joukowskisim.boundary import update_wall_vorticity, wall_velocity_error
 from joukowskisim.diagnostics import divergence
+from joukowskisim.pressure import (
+    analytical_kutta_joukowski_cp,
+    kutta_joukowski_circulation,
+    surface_coefficients,
+)
 from joukowskisim.solver import FlowSolver, SolverConfig
 
 
@@ -58,10 +63,52 @@ def test_viscous_decay_operator():
 
 
 def test_pressure_cp_finite(small_solver):
-    from joukowskisim.pressure import surface_coefficients
     p=small_solver.compute_pressure(); c=surface_coefficients(small_solver,p)
     assert np.isfinite(p).all() and np.isfinite(c['cp']).all()
+    assert c['cp_kj'].shape == (small_solver.config.ntheta,)
+    assert np.isfinite(c['cp_kj']).all()
     assert np.isfinite(c['cl_pressure']) and np.isfinite(c['cd_pressure'])
+
+
+def test_analytical_kutta_joukowski_cp_properties():
+    s=FlowSolver(SolverConfig(nr=12,ntheta=128,re=100,alpha=7,startup_time=0))
+    cp=analytical_kutta_joukowski_cp(
+        s.mapping, s.grid.theta, s.config.u_inf, s.config.alpha
+    )
+    cp_fast=analytical_kutta_joukowski_cp(
+        s.mapping, s.grid.theta, 2.5*s.config.u_inf, s.config.alpha
+    )
+    assert cp.shape == (s.config.ntheta,)
+    assert np.isfinite(cp).all() and np.max(cp) <= 1.0 + 1e-12
+    assert np.isclose(cp[0], 1.0, atol=1e-12)
+    assert np.allclose(cp, cp_fast, rtol=2e-13, atol=2e-13)
+    assert kutta_joukowski_circulation(
+        s.mapping, s.config.u_inf, s.config.alpha
+    ) > 0
+
+    symmetric=analytical_kutta_joukowski_cp(
+        s.mapping, s.grid.theta, s.config.u_inf, 0.0
+    )
+    assert np.allclose(symmetric, np.roll(symmetric[::-1], 1), atol=2e-12)
+
+
+def test_analytical_pressure_integrates_to_kutta_joukowski_lift():
+    s=FlowSolver(SolverConfig(
+        nr=12,ntheta=128,re=100,alpha=7,camber=.03,startup_time=0
+    ))
+    cp=analytical_kutta_joukowski_cp(
+        s.mapping, s.grid.theta, s.config.u_inf, s.config.alpha
+    )
+    qinf=0.5*s.config.u_inf**2
+    force=-np.sum(qinf*cp*s.es[0]*s.H[0])*(2*np.pi/s.config.ntheta)
+    alpha=np.deg2rad(s.config.alpha)
+    cd=(force.real*np.cos(alpha)+force.imag*np.sin(alpha))/qinf
+    cl=(-force.real*np.sin(alpha)+force.imag*np.cos(alpha))/qinf
+    expected_cl=2*kutta_joukowski_circulation(
+        s.mapping, s.config.u_inf, s.config.alpha
+    )/s.config.u_inf
+    assert abs(cd) < 5e-4
+    assert np.isclose(cl, expected_cl, rtol=5e-4, atol=5e-4)
 
 
 def test_headless_wake_and_symmetry_sanity():
@@ -82,4 +129,3 @@ def test_circulation_sign_convention_is_documented_and_consistent():
     # Clockwise-positive Gamma is defined as integral psi_s dtheta.
     psi_s=np.ones((5,32))*0.25
     assert circulation_from_streamfunction(psi_s,2)>0
-
