@@ -1,7 +1,12 @@
 import numpy as np
 from scipy import linalg
 
-from joukowskisim.batched_lu import solve_cached_columns, solve_cached_groups
+from joukowskisim.batched_lu import (
+    _GROUP_CALL_WORK,
+    _balanced_group_tasks,
+    solve_cached_columns,
+    solve_cached_groups,
+)
 
 
 def _factors(count: int, size: int):
@@ -12,6 +17,59 @@ def _factors(count: int, size: int):
         linalg.lu_factor(matrix, check_finite=False)
         for matrix in matrices
     ]
+
+
+def _sequential_groups(sizes):
+    start = 0
+    groups = []
+    for size in sizes:
+        groups.append(tuple(range(start, start + size)))
+        start += size
+    return tuple(groups)
+
+
+def test_group_tasks_deterministically_balance_skewed_rhs_counts():
+    sizes = (100, 56, 34, 30, 26, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2)
+    groups = _sequential_groups(sizes)
+
+    first = _balanced_group_tasks(groups, 4)
+    second = _balanced_group_tasks(groups, 4)
+
+    assert first == second
+    assert sorted(group_index for task in first for group_index in task) == list(
+        range(len(groups))
+    )
+    loads = tuple(
+        sum(
+            _GROUP_CALL_WORK + sizes[group_index]
+            for group_index in task
+        )
+        for task in first
+    )
+    assert loads == (216, 220, 244, 210)
+
+
+def test_balanced_group_tasks_preserve_real_and_split_complex_results():
+    sizes = (100, 56, 34, 30, 26, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2)
+    groups = _sequential_groups(sizes)
+    factors = _factors(len(groups), 5)
+    rng = np.random.default_rng(4815)
+    real_rhs = rng.standard_normal((5, sum(sizes)))
+
+    for rhs in (real_rhs, real_rhs + 1j * rng.standard_normal(real_rhs.shape)):
+        expected = np.empty_like(rhs)
+        for factor, group in zip(factors, groups):
+            expected[:, group] = linalg.lu_solve(
+                factor,
+                rhs[:, group],
+                check_finite=False,
+            )
+
+        original = rhs.copy()
+        got = solve_cached_groups(factors, groups, rhs)
+
+        assert np.allclose(got, expected, rtol=2e-13, atol=2e-13)
+        assert np.array_equal(rhs, original)
 
 
 def test_parallel_cached_lu_matches_scipy_for_real_columns():

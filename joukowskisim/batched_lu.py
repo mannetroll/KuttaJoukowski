@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import os
 
 import numpy as np
@@ -15,6 +16,11 @@ _WORKERS = max(
     min(4, int(os.environ.get("JOUKOWSKISIM_LU_WORKERS", _CPU_COUNT))),
 )
 _PARALLEL_COLUMNS = 192
+# A grouped solve has fixed Python/LAPACK dispatch and scatter costs in
+# addition to work proportional to its RHS count.  Production-size (Nr=240)
+# microbenchmarks put that fixed component near 32 column-equivalents.  This
+# weight outperformed both equal-group chunks and RHS-count-only balancing.
+_GROUP_CALL_WORK = 32
 _EXECUTOR = (
     ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="joukowski-lu")
     if _WORKERS > 1
@@ -28,6 +34,46 @@ def _column_chunks(count: int, workers: int) -> tuple[tuple[int, int], ...]:
         (start, min(start + width, count))
         for start in range(0, count, width)
     )
+
+
+@lru_cache(maxsize=32)
+def _balanced_group_tasks(
+    column_groups: tuple[tuple[int, ...], ...],
+    workers: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Assign variable-size LU groups to workers with deterministic LPT.
+
+    A grouped ``getrs`` solve has both a fixed call cost and work proportional
+    to its number of right-hand-side columns.  Contiguous equal-count chunks
+    can therefore be badly imbalanced when profile grouping produces a few
+    large groups.  The longest-processing-time greedy schedule assigns the
+    largest estimated jobs first to the currently lightest worker.  Stable
+    index tie-breaks keep the schedule reproducible, and caching removes the
+    scheduling overhead from repeated preconditioner applications.
+    """
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    if not column_groups:
+        return ()
+
+    task_count = min(workers, len(column_groups))
+    assignments: list[list[int]] = [[] for _ in range(task_count)]
+    loads = [0] * task_count
+    group_indices = sorted(
+        range(len(column_groups)),
+        key=lambda group_index: (
+            -(_GROUP_CALL_WORK + len(column_groups[group_index])),
+            group_index,
+        ),
+    )
+    for group_index in group_indices:
+        worker = min(
+            range(task_count),
+            key=lambda worker_index: (loads[worker_index], worker_index),
+        )
+        assignments[worker].append(group_index)
+        loads[worker] += _GROUP_CALL_WORK + len(column_groups[group_index])
+    return tuple(tuple(assignment) for assignment in assignments)
 
 
 def solve_cached_columns(
@@ -173,11 +219,11 @@ def solve_cached_groups(
         dtype=np.result_type(values.dtype, factors[0][0].dtype),
     )
     if _EXECUTOR is None or values.shape[1] < _PARALLEL_COLUMNS:
-        ranges = ((0, len(column_groups)),)
+        group_tasks = (tuple(range(len(column_groups))),)
     else:
-        ranges = _column_chunks(len(column_groups), _WORKERS)
+        group_tasks = _balanced_group_tasks(column_groups, _WORKERS)
     # Real-valued stages dominate the mapped implicit preconditioner.  Give
-    # each parallel range one reusable C-order scratch slab; transposing a
+    # each parallel task one reusable C-order scratch slab; transposing a
     # populated (group, rows) slice gives LAPACK the F-contiguous
     # (rows, group) multi-RHS matrix it expects.  This avoids allocating and
     # freeing one temporary array for every group while keeping worker writes
@@ -187,7 +233,7 @@ def solve_cached_groups(
         if split_complex
         else np.empty(
             (
-                len(ranges),
+                len(group_tasks),
                 max(len(group) for group in column_groups),
                 values.shape[0],
             ),
@@ -196,15 +242,14 @@ def solve_cached_groups(
         )
     )
 
-    def solve_range(task: tuple[int, tuple[int, int]]) -> None:
-        workspace_index, bounds = task
-        start, stop = bounds
+    def solve_task(task: tuple[int, tuple[int, ...]]) -> None:
+        workspace_index, group_indices = task
         scratch = (
             None
             if real_workspace is None
             else real_workspace[workspace_index]
         )
-        for group_index in range(start, stop):
+        for group_index in group_indices:
             group = column_groups[group_index]
             lu, pivots = factors[group_index]
             if split_complex:
@@ -248,10 +293,10 @@ def solve_cached_groups(
                     f"with info={info}"
                 )
 
-    tasks = tuple(enumerate(ranges))
+    tasks = tuple(enumerate(group_tasks))
     if len(tasks) == 1:
-        solve_range(tasks[0])
+        solve_task(tasks[0])
     else:
         # Materialize the iterator so worker exceptions are raised here.
-        tuple(_EXECUTOR.map(solve_range, tasks))
+        tuple(_EXECUTOR.map(solve_task, tasks))
     return np.ascontiguousarray(out)
