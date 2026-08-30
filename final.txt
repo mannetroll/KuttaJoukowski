@@ -1,0 +1,19 @@
+Implemented a complete Python 3.13 `uv` project with package `joukowskisim`.
+
+- Mathematical formulation: 2D incompressible vorticity–streamfunction Navier–Stokes equations with mapped Jacobian, explicit viscosity, pressure post-processing, circulation, lift, drag, wall slip, and energy diagnostics.
+- Mapping: chord-normalized offset-circle Joukowski map using logarithmic radius. The airfoil is exactly the `s=0` boundary. A finite `te_gap=0.015` avoids the cusp singularity and keeps the analytic metric positive.
+- Numerical method: Fourier spectral derivatives using multithreaded SciPy FFTs, Chebyshev–Gauss–Lobatto radial collocation, cached modal LU Poisson solves, 2/3 dealiasing, adaptive SSPRK3, outer sponge, and advective/viscous timestep limits.
+- Boundaries: constant wall streamfunction, cubic generalized Thom wall-vorticity reconstruction, zero outer vorticity, mapped free-stream Dirichlet condition, and smooth startup ramp.
+- Pressure/Cp: pressure-Poisson reconstruction with outer pressure reference, surface Cp, pressure lift and drag, plus circulation-based lift.
+- GUI: responsive PySide6 worker thread, dark theme, editable solver/grid controls, cached physical-space inverse-map rasterization, NumPy colormaps, accurate airfoil overlay, diagnostics, and Qt-native upper/lower Cp plot.
+- Tests: `20 passed`, collectively covering all 23 requested geometry, operator, Poisson, velocity, boundary, pressure, stability, symmetry, wake, and headless validation categories.
+- Benchmark: 64×128, 30 steps—approximately `170 steps/s`; FFT, nonlinear, Poisson, pressure, and total timings are reported.
+- Limitations: finite trailing-edge regularization, approximate wall-vorticity closure, finite outer boundary, and a restrictive explicit viscous CFL at high Chebyshev resolution. High-Reynolds-number cases require careful resolution and long runtimes; this remains a 2D laminar/unsteady solver without turbulence modeling.
+
+Run:
+
+```bash
+uv run simulation
+uv run pytest -q
+uv run python -m joukowskisim.main --headless --steps 100
+```
