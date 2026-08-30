@@ -37,7 +37,7 @@ def test_far_field_velocity_approaches_uniform(small_solver):
 
 
 def test_deterministic_initialization():
-    c=SolverConfig(nr=14,ntheta=32,re=100,startup_time=0)
+    c=SolverConfig(nr=14,ntheta=32,re=100)
     a=FlowSolver(c); b=FlowSolver(c)
     assert np.array_equal(a.omega,b.omega) and np.array_equal(a.psi,b.psi)
 
@@ -48,14 +48,14 @@ def test_positive_finite_timestep_and_trailing_edge_stability(small_solver):
 
 
 def test_finite_values_after_timesteps():
-    s=FlowSolver(SolverConfig(nr=16,ntheta=32,re=100,alpha=8,startup_time=.01))
+    s=FlowSolver(SolverConfig(nr=16,ntheta=32,re=100,alpha=8))
     for _ in range(12): s.step()
     assert np.isfinite(s.omega).all() and np.isfinite(s.psi).all()
     assert s.step_count==12 and s.diagnostics()['max_omega']>0
 
 
 def test_viscous_decay_operator():
-    s=FlowSolver(SolverConfig(nr=16,ntheta=32,re=50,startup_time=0))
+    s=FlowSolver(SolverConfig(nr=16,ntheta=32,re=50))
     w=np.sin(np.pi*s.S/s.mapping.s_max)*np.sin(2*s.T)
     diffusion=s.config.nu*s.grid.laplacian_coordinate(w)/s.H2
     weighted=np.sum(w*diffusion*s.H2)
@@ -71,7 +71,7 @@ def test_pressure_cp_finite(small_solver):
 
 
 def test_analytical_kutta_joukowski_cp_properties():
-    s=FlowSolver(SolverConfig(nr=12,ntheta=128,re=100,alpha=7,startup_time=0))
+    s=FlowSolver(SolverConfig(nr=12,ntheta=128,re=100,alpha=7))
     cp=analytical_kutta_joukowski_cp(
         s.mapping, s.grid.theta, s.config.u_inf, s.config.alpha
     )
@@ -94,7 +94,7 @@ def test_analytical_kutta_joukowski_cp_properties():
 
 def test_analytical_pressure_integrates_to_kutta_joukowski_lift():
     s=FlowSolver(SolverConfig(
-        nr=12,ntheta=128,re=100,alpha=7,camber=.03,startup_time=0
+        nr=12,ntheta=128,re=100,alpha=7,camber=.03
     ))
     cp=analytical_kutta_joukowski_cp(
         s.mapping, s.grid.theta, s.config.u_inf, s.config.alpha
@@ -112,11 +112,11 @@ def test_analytical_pressure_integrates_to_kutta_joukowski_lift():
 
 
 def test_headless_wake_and_symmetry_sanity():
-    s=FlowSolver(SolverConfig(nr=16,ntheta=40,re=150,alpha=10,startup_time=.002))
+    s=FlowSolver(SolverConfig(nr=16,ntheta=40,re=150,alpha=10))
     for _ in range(15): s.step()
     downstream=(s.x>1.0) & (s.x<3.0)
     assert np.max(abs(s.omega[downstream]))>1e-12
-    z=FlowSolver(SolverConfig(nr=16,ntheta=40,re=150,alpha=0,startup_time=.002))
+    z=FlowSolver(SolverConfig(nr=16,ntheta=40,re=150,alpha=0))
     for _ in range(8): z.step()
     # Reflection symmetry: vorticity changes sign across the chord plane.
     reflected=np.roll(z.omega[:,::-1],1,axis=1)

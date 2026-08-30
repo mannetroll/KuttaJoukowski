@@ -4,6 +4,10 @@ Make reasonable mathematical, numerical, and implementation choices.
 
 Implement the complete solution.
 Run tests, fix failures, and repeat until all tests pass.
+This repository already contains a working SciPy/NumPy reference solver.  Work
+incrementally from it and preserve its validated behavior.  The persistent MLX
+path and its correctness/performance gates are outstanding implementation
+work, not permission to replace the reference with an unverified FFT shim.
 At the end, give a concise summary of:
 - the mathematical formulation,
 - the conformal mapping,
@@ -13,7 +17,7 @@ At the end, give a concise summary of:
 - known limitations,
 - and how to run it.
 
-Create a complete 2D incompressible Navier–Stokes airfoil solver in Python 3.13 using a conformal Joukowski-type mapping, a vorticity–streamfunction formulation, SciPy multithreaded FFTs, NumPy, and PySide6.
+Create a complete 2D incompressible Navier–Stokes airfoil solver in Python 3.13 using a conformal Joukowski-type mapping, a vorticity–streamfunction formulation, a mandatory SciPy/NumPy float64 reference backend, a persistent MLX backend on supported Apple Silicon, and PySide6.
 
 The purpose is to solve viscous unsteady flow around an airfoil on a body-fitted spectral grid obtained by conformally mapping a simple circular computational domain into an airfoil-shaped physical domain.
 
@@ -48,18 +52,22 @@ Use:
     scipy
     PySide6
 
+Optional on Apple Silicon:
+
+    mlx
+
 Do not use:
 - PyTorch
 - TensorFlow
 - JAX
 - CuPy
-- MLX
 - OpenCV
 - numba
 - matplotlib for the live GUI renderer
 - external CFD packages
 
-SciPy FFT must be used for spectral transforms.
+The SciPy/NumPy float64 implementation is the numerical reference and must
+always remain available.  It must use SciPy FFT for spectral transforms.
 
 Use multithreaded SciPy FFT calls where possible, for example:
 
@@ -69,6 +77,28 @@ Use multithreaded SciPy FFT calls where possible, for example:
     scipy.fft.irfft(..., workers=-1)
 
 If a multidimensional FFT is appropriate, use scipy.fft with workers=-1.
+
+On supported Apple Silicon, implement an MLX backend, but it must be a
+persistent end-to-end solver backend rather than an FFT-only accelerator.
+Keep the timestep state, streamfunction and vorticity fields, mapping metrics,
+spectral operators, Poisson/implicit solves, nonlinear products, boundary
+updates, and LS-IMEX-RK3 stages resident in MLX throughout the timestep hot
+path.  Transfer only the selected visualization field and small diagnostic
+results to NumPy at rendered-frame or explicitly requested diagnostic
+boundaries.
+
+Do NOT shuttle NumPy arrays to MLX for an FFT and immediately return them to
+the host for SciPy linear algebra.  The transfer, dtype conversion, and lazy
+evaluation synchronization make that design slower and less accurate than the
+SciPy reference.  Follow the persistent-state, functional-update, bounded
+``mx.eval``/synchronization patterns in the supplied ``turbo_simulator.py``.
+Do not let a lazy MLX graph grow across an unbounded number of timesteps.
+
+MLX uses float32/complex64 on Metal, whereas the reference remains float64.
+The MLX backend must therefore pass backend-appropriate correctness and
+convergence comparisons against the SciPy reference before it can be selected
+automatically or described as accelerated.  If correctness or end-to-end
+benchmark gating fails, fall back to SciPy with a clear diagnostic.
 
 ============================================================
 PHYSICAL PROBLEM
@@ -303,14 +333,15 @@ and larger configurations such as:
     Ntheta = 1024
     Nr = 256
 
-Theta derivatives must use FFT.
+Theta derivatives must use the active backend's FFT implementation.
 
 For a field f(s, theta):
 
     f_theta
     f_thetatheta
 
-must be computed spectrally with scipy.fft.
+must be computed spectrally with ``scipy.fft`` in the float64 reference and
+with ``mlx.core.fft`` while remaining device-resident in the MLX backend.
 
 Use Fourier wavenumbers generated consistently with a 2*pi-periodic domain.
 
@@ -329,7 +360,7 @@ Precompute:
     first derivative matrix
     second derivative matrix
     theta wavenumbers
-    dealiasing mask
+    Fourier and radial dealiasing/filter data
     mapping coordinates
     metric arrays
     surface geometry
@@ -399,7 +430,10 @@ At every required stage, solve:
 
 Exploit the Fourier direction.
 
-Transform RHS in theta using scipy.fft.
+Transform RHS in theta using the active backend FFT.  Use ``scipy.fft`` with
+float64 arrays for the reference implementation.  In MLX, keep the transformed
+RHS, modal solve, and inverse transform on device; do not cross to SciPy between
+the forward and inverse transforms.
 
 For each Fourier mode k:
 
@@ -528,42 +562,89 @@ Prefer dealiasing of participating derivative/product fields consistently.
 
 Avoid aliasing-driven instability.
 
+Also control aliasing in the Chebyshev/log-radius direction.  Prefer a true
+3/2-padded Chebyshev product evaluation using DCT-I coefficient conventions,
+or an equivalent backend-native padded Chebyshev transform.  A carefully
+documented smooth high-mode filter applied only to the nonlinear term is an
+acceptable fallback if padded products are not yet practical.
+
+Do NOT apply a blanket radial filter or hard truncation to ``omega``, ``psi``,
+the viscous operator, wall-vorticity values, or complete Runge–Kutta stage
+states.  The physical wall layer has genuine high Chebyshev content; filtering
+the state can corrupt boundary values, smear the layer across the domain, or
+create new global ringing.  Radial filtering must not be used merely to hide
+concentric artifacts in the renderer.  Test its modal action and its boundary
+impact explicitly.
+
+For MLX, implement radial padding/filtering with persistent device-resident
+arrays, an FFT-based DCT-I equivalent, or precomputed device operators.  Do not
+round-trip through SciPy DCT inside a timestep.
+
 ============================================================
 TIME INTEGRATION
 ============================================================
 
-Use a robust low-storage third-order Runge–Kutta method.
+Use the three-stage low-storage semi-implicit method ``LS_IMEX_RK3`` for the
+production timestepper.  Use the coefficients from the supplied
+``turbo_simulator.py`` reference:
 
-Preferred:
+    alpha = (8/15, 5/12, 3/4)
+    beta  = (0, -17/60, -5/12)
 
-    SSPRK3
+The cumulative stage output times for time-dependent boundary/startup data are:
 
-or a documented low-storage RK3.
+    c = (8/15, 2/3, 1)
 
-Treat the nonlinear advection explicitly.
+Use these stage times consistently rather than applying the completed-step
+boundary value to all three stages.
 
-For moderate Reynolds number, explicit viscous integration may be acceptable at smaller grids, but the default production solver should avoid a timestep dominated unnecessarily by Chebyshev wall clustering.
+For an equation written as:
 
-Preferred production method:
+    omega_t = L(omega) + N(omega)
 
-    IMEX RK3
+where ``L`` is the treated-implicitly viscous operator and ``N`` contains the
+explicit nonlinear and other nonstiff terms, each low-storage stage must be
+implemented consistently with:
 
-or
+    (I - alpha_i * dt * L) omega_i
+      =
+    (I + beta_i * dt * L) omega_previous
+      + alpha_i * dt * N_current
+      + beta_i  * dt * N_previous
 
-    integrating-factor / semi-implicit viscous treatment
+Update the stored previous nonlinear term exactly once per stage, as in the
+local reference.  Document the sign convention used for ``L`` and verify the
+scheme on scalar decay and manufactured diffusion problems.
 
-where the stiff radial diffusion contribution is treated implicitly if reasonably implementable.
+Accuracy warning: the supplied recurrence has the third-order explicit RK
+stability polynomial, but with nonzero ``L`` it is only first-order accurate
+for pure implicit scalar decay.  Retain the ``LS_IMEX_RK3`` name only as the
+reference implementation's identifier; do not describe the complete split
+method as third-order.  Measure and report the explicit and implicit orders.  A
+genuinely third-order full IMEX method requires a different, documented tableau
+and must not be substituted silently for the supplied recurrence.
 
-If implementing fully explicit RK3 initially, compute and enforce both:
+At minimum, treat the stiff mapped radial diffusion:
 
-    advective CFL condition
-    diffusive stability condition
+    L_r(omega) = nu/H^2 * omega_ss
 
-and choose:
+implicitly.  Treating the full mapped viscous operator implicitly is also
+acceptable if its coupled solve is correct and efficient.  Incorporate wall
+and outer vorticity conditions consistently into every implicit stage solve.
+Precompute or cache stage operators/factorizations when the timestep policy
+allows it, and use batched/device-resident solves in MLX.
 
-    dt = safety * min(dt_adv, dt_diff)
+The production timestep must no longer be pinned to approximately 3e-9 by the
+explicit Chebyshev wall spacing at the documented ``Nr=160`` default.  The
+adaptive constraint should be based primarily on mapped advective CFL and any
+remaining explicitly treated terms.  Keep a fully explicit float64 stepper
+only as a small-grid reference/testing option; it must not be the default GUI
+path.
 
-The application must remain stable for its documented default case.
+The application must remain stable and advance meaningful physical time for
+its documented default case.  A large timestep count while displayed physical
+time remains effectively zero is a failed production configuration, not an
+acceptable performance tradeoff.
 
 ============================================================
 CFL
@@ -733,9 +814,29 @@ Construct an inviscid potential-flow streamfunction around the generating circle
 
 Alternatively, start from a smooth ramped free-stream field satisfying wall impermeability.
 
+Another acceptable path is a deterministic full-strength initial state whose
+``psi``, ``omega``, wall/far-field data, and no-slip condition satisfy the
+discrete Poisson and boundary equations to measured tolerances.  For example,
+add a smooth radial lift to the harmonic slip flow and reconstruct compatible
+vorticity.  A verified compatible full-strength state does not require a ramp.
+
 Do not initialize an arbitrary discontinuity at the no-slip wall.
 
 Ramp the no-slip/free-stream forcing over a short startup interval if necessary to suppress an unphysical impulsive vorticity spike.
+
+If a startup ramp is used, it must be a smooth function of physical simulation time and
+must be evaluated consistently at the LS-IMEX-RK3 stage times.  Do NOT force
+the ramp to completion after a fixed number of steps and do not use a
+``max(time/startup_time, step_count/N)`` shortcut.  With a stiff explicit
+timestep, that shortcut turns a nominally smooth startup into an almost
+instantaneous impulse, generates an unresolved wall layer, and excites global
+radial Chebyshev oscillations.
+
+Any startup compatibility iterations must operate on a nonzero, physically
+meaningful ramp state; iterations performed while all boundary targets are
+zero do not seed a boundary layer.  Verify that startup produces bounded wall
+vorticity, decreasing wall slip, no domain-wide alternating radial tail, and
+monotone advancement of physical time.
 
 The initial condition must be deterministic.
 
@@ -982,6 +1083,7 @@ Editable controls:
     CFL
     field
     frame every n steps
+    backend: auto / SciPy / MLX where MLX is available and gated
 
 Useful optional controls:
 
@@ -1019,6 +1121,12 @@ Use sensible defaults such as:
 
     Pressure update every 10 rendered frames
 
+    Backend = auto
+
+``auto`` may select MLX only after its correctness checks pass and a synchronized
+end-to-end benchmark for the relevant production workload demonstrates a real
+speedup.  Otherwise it must select the SciPy float64 reference.
+
 For test/headless mode use much smaller grids.
 
 ============================================================
@@ -1038,9 +1146,17 @@ Display without flickering:
     circulation Gamma
     Cl from circulation
     Cl from pressure if available
+    cumulative FPS as a whole integer
     Cd if available
     wall-slip error
     kinetic-energy-like diagnostic
+
+Compute cumulative FPS from total produced simulation frames divided by
+wall-clock time elapsed since the first Start after the last Reset.  Pause time
+remains in the denominator because the metric is explicitly wall time since
+start.  Use a monotonic clock, update it once per produced frame, and display
+the rate rounded to the nearest integer without decimal places.  Do not report
+timestep iterations per second as GUI FPS.
 
 Update text labels at a lower rate than the solver timestep.
 
@@ -1072,7 +1188,9 @@ GUI modules must not contain core CFD equations.
 PERFORMANCE
 ============================================================
 
-The solver should be efficient on a multicore desktop CPU.
+The SciPy reference should be efficient on a multicore desktop CPU, and the
+optional MLX implementation should accelerate the complete timestep hot path
+on supported Apple Silicon only when measured evidence justifies it.
 
 Use:
 
@@ -1096,6 +1214,27 @@ Avoid:
 Python loops over Fourier modes may be acceptable for radial linear solves, but optimize/batch when practical.
 
 Set SciPy FFT workers explicitly.
+
+For MLX:
+
+    keep persistent state and constants on device
+    use functional array updates appropriate to MLX
+    cache wavenumbers, masks, mappings, and implicit stage operators
+    fuse/batch operations where practical
+    realize the lazy graph at bounded stage or completed-step checkpoints
+    synchronize before recording benchmark timings
+    transfer one selected field at most per rendered GUI frame
+
+Do not advertise FFT-only offload as GPU acceleration.  Do not place a SciPy
+LU solve between an MLX forward FFT and MLX inverse FFT.  Do not repeatedly
+cast float64 NumPy state to float32 MLX and back inside the timestep.
+
+The SciPy float64 backend is the correctness oracle.  The MLX float32 backend
+must show convergent agreement in fields and diagnostics at appropriately
+documented tolerances.  It must also beat SciPy in synchronized, warm,
+end-to-end steps per second by a statistically meaningful margin before
+``auto`` selects it or the GUI labels it accelerated.  Compare identical
+grids, physics, pressure cadence, and diagnostic cadence; report both results.
 
 ============================================================
 NUMERICAL DIAGNOSTICS
@@ -1192,6 +1331,45 @@ At minimum include tests for:
    For positive alpha after startup,
    verify circulation has the conventionally expected sign according to the implementation's documented convention.
 
+24. LS_IMEX_RK3 coefficients and observed order
+   Verify the exact ``alpha`` and ``beta`` tuples above and scalar linear decay.
+   Demonstrate third-order convergence for the purely explicit recurrence and
+   explicitly characterize the supplied recurrence's first-order pure-implicit
+   convergence.  Do not assert third-order convergence for the complete split
+   method unless a different order-consistent tableau is implemented and named.
+
+25. Implicit radial diffusion
+   Verify unconditional decay of stiff radial modes over timesteps that exceed
+   the explicit Chebyshev diffusion limit, with wall and outer boundary values
+   enforced at every stage.
+
+26. Compatible initialization or physical-time startup ramp
+   Always verify the discrete initialization compatibility residuals and the
+   absence of an impulsive vorticity spike.  If a ramp is used, also verify that
+   its value depends on physical/stage time rather than step count and that two
+   histories reaching the same time obtain the same boundary target.
+
+27. Radial alias control
+   Verify low Chebyshev modes are preserved, rejected/padded modes behave as
+   documented, the radial axis is correct, and nonlinear dealiasing does not
+   overwrite wall or outer state values.
+
+28. Radial ringing regression
+   On a moderate mapped grid, verify startup vorticity is localized near the
+   wall/wake rather than forming an alternating-sign tail across nearly every
+   radial node.  Use a quantitative modal/tail measure, not image comparison.
+
+29. SciPy/MLX backend comparison
+   Always test the SciPy float64 reference.  When MLX and a Metal device are
+   available, compare mapping-independent operators, Poisson/implicit stage
+   residuals, several complete steps, circulation, energy, and wall slip using
+   justified float32 tolerances.  Skip cleanly when MLX is unavailable.
+
+30. Backend gating and cumulative FPS
+   Test that failed correctness or benchmark gates force ``auto`` to SciPy.
+   Test cumulative FPS with an injected monotonic clock, including paused-time
+   inclusion, reset behavior, and integer display formatting.
+
 ============================================================
 MANUFACTURED SOLUTIONS
 ============================================================
@@ -1240,7 +1418,16 @@ Measure:
     FFT time
     streamfunction solve time
     nonlinear-term time
+    implicit LS_IMEX_RK3 solve time
     pressure solve time
+
+Benchmark both the SciPy float64 reference and MLX, when available, using the
+same workload.  Warm up both paths, synchronize MLX before starting and ending
+each timed sample, run enough repeated samples to report a robust median, and
+include all device transfers required by the real GUI/headless workflow.
+Separately timed FFT microbenchmarks may be diagnostic, but they must not be
+used to claim solver acceleration.  The gating decision must use complete
+timesteps and must include the normal diagnostic cadence.
 
 Use a moderate grid.
 
@@ -1278,12 +1465,14 @@ Prioritize correctness in this order:
 2. streamfunction Poisson equation
 3. velocity transformation
 4. no-slip wall vorticity treatment
-5. nonlinear advection
-6. time integration stability
-7. far-field condition
-8. pressure reconstruction
-9. GUI rendering
-10. performance optimization
+5. physical-time startup without radial ringing
+6. nonlinear advection and two-direction dealiasing
+7. LS_IMEX_RK3 time integration stability
+8. far-field condition
+9. pressure reconstruction
+10. SciPy/MLX backend agreement
+11. GUI rendering
+12. measured performance optimization
 
 Do not spend time making the GUI elaborate while the CFD solution is physically wrong.
 
@@ -1339,7 +1528,9 @@ Then implement:
 
     wall boundary condition
     vorticity RHS
-    time integrator
+    physical-time startup
+    LS_IMEX_RK3 time integrator
+    radial nonlinear alias control
 
 Then:
 
@@ -1351,6 +1542,11 @@ Then:
 
     GUI
     renderer
+
+Keep the SciPy float64 implementation working as the reference throughout.
+Only after it passes the numerical tests, implement the persistent MLX path
+and run the correctness and synchronized end-to-end benchmark gates.  Do not
+replace a correct reference path with an unverified float32 backend.
 
 After each major stage:
 
@@ -1381,11 +1577,12 @@ At completion, report only a concise summary containing:
 3. Mapping and spectral discretization
 4. Wall / far-field boundary treatment
 5. Time integration
-6. Pressure and Cp reconstruction
-7. GUI / rendering design
-8. Test results
-9. Benchmark result if available
-10. Exact commands to run:
+6. Startup and radial alias treatment
+7. Pressure and Cp reconstruction
+8. GUI / rendering design
+9. SciPy/MLX correctness comparison
+10. Synchronized end-to-end benchmark results
+11. Exact commands to run:
 
        uv run simulation
 
@@ -1398,5 +1595,3 @@ Also explicitly mention any remaining numerical limitation, especially:
 - wall-vorticity accuracy,
 - finite outer boundary,
 - and high-Re stability.
-
-

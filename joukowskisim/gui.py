@@ -2,12 +2,36 @@
 
 from __future__ import annotations
 import threading
+import time
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .solver import FlowSolver, SolverConfig
 from .renderer import CurvilinearRenderer
 from .pressure import analytical_kutta_joukowski_cp, surface_coefficients
+
+
+class _CumulativeFrameRate:
+    """Count produced simulation frames over wall time since the first start."""
+
+    def __init__(self, clock=None):
+        self._clock = time.perf_counter if clock is None else clock
+        self.reset()
+
+    def reset(self):
+        self.frames = 0
+        self.started_at = None
+
+    def start(self):
+        if self.started_at is None:
+            self.started_at = self._clock()
+
+    def record_frame(self):
+        self.start()
+        self.frames += 1
+        elapsed = max(0.0, self._clock() - self.started_at)
+        fps = int(self.frames / elapsed + 0.5) if elapsed > 0.0 else 0
+        return self.frames, elapsed, fps
 
 
 class SimulationThread(QtCore.QThread):
@@ -18,6 +42,7 @@ class SimulationThread(QtCore.QThread):
         super().__init__(); self.solver = solver; self.field_name = field
         self.frame_skip = max(1, frame_skip); self.pressure_every = pressure_every
         self.running = False; self.shutdown = False; self._lock = threading.Lock()
+        self.frame_rate = _CumulativeFrameRate()
 
     def run(self):
         try:
@@ -32,9 +57,19 @@ class SimulationThread(QtCore.QThread):
                 coeff = None
                 if self.solver.pressure is not None:
                     coeff = surface_coefficients(self.solver, self.solver.pressure)
-                self.frame_ready.emit(field, self.solver.diagnostics(), coeff)
+                stats = self.solver.diagnostics()
+                frames, elapsed, fps = self.frame_rate.record_frame()
+                stats.update({"simulation_frames": frames, "fps_elapsed": elapsed, "fps": fps})
+                self.frame_ready.emit(field, stats, coeff)
         except Exception as exc:
             self.running = False; self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+    def resume(self):
+        self.frame_rate.start()
+        self.running = True
+
+    def pause(self):
+        self.running = False
 
     def set_field(self, name: str):
         with self._lock: self.field_name = name
@@ -202,6 +237,8 @@ class MainWindow(QtWidgets.QMainWindow):
     fields=["Vorticity","Velocity magnitude","u velocity","v velocity","Pressure","Cp-like pressure field","Streamfunction"]
     def __init__(self):
         super().__init__(); self.setWindowTitle("JoukowskiSim — Conformal Navier–Stokes"); self.resize(1280,850)
+        self._worker_generation = 0
+        self._retired_workers = []
         self._build_controls(); self.reset_solver()
 
     def _build_controls(self):
@@ -215,14 +252,27 @@ class MainWindow(QtWidgets.QMainWindow):
         row=QtWidgets.QHBoxLayout(); self.start=QtWidgets.QPushButton("Start"); self.pause=QtWidgets.QPushButton("Pause"); self.reset=QtWidgets.QPushButton("Reset")
         for b in (self.start,self.pause,self.reset): row.addWidget(b)
         form.addRow(row); self.stats=QtWidgets.QLabel("Ready"); self.stats.setWordWrap(True); self.stats.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse); form.addRow(self.stats)
-        self.start.clicked.connect(lambda: setattr(self.worker,"running",True)); self.pause.clicked.connect(lambda: setattr(self.worker,"running",False)); self.reset.clicked.connect(self.reset_solver); self.field.currentTextChanged.connect(self._field_changed)
+        self.start.clicked.connect(self._start_simulation); self.pause.clicked.connect(self._pause_simulation); self.reset.clicked.connect(self.reset_solver); self.field.currentTextChanged.connect(self._field_changed)
 
     def _config(self):
         return SolverConfig(re=float(self.edits['re'].text()),alpha=float(self.edits['alpha'].text()),u_inf=float(self.edits['u_inf'].text()),nr=int(self.edits['nr'].text()),ntheta=int(self.edits['ntheta'].text()),outer_radius=float(self.edits['outer_radius'].text()),cfl=float(self.edits['cfl'].text()),thickness=float(self.edits['thickness'].text()),camber=float(self.edits['camber'].text()))
 
     def reset_solver(self):
         if hasattr(self,'worker'):
-            self.worker.shutdown=True; self.worker.wait(3000)
+            old_worker = self.worker
+            old_worker.pause(); old_worker.shutdown = True
+            for signal in (old_worker.frame_ready, old_worker.failed):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+            if not old_worker.wait(3000):
+                self._retired_workers.append(old_worker)
+                old_worker.finished.connect(
+                    lambda worker=old_worker: self._forget_worker(worker)
+                )
+                if not old_worker.isRunning():
+                    self._forget_worker(old_worker)
             self.visual_col.removeWidget(self.view); self.view.deleteLater(); self.visual_col.removeWidget(self.cpplot); self.cpplot.deleteLater()
         try: self.solver=FlowSolver(self._config())
         except Exception as exc: QtWidgets.QMessageBox.critical(self,"Configuration error",str(exc)); return
@@ -234,21 +284,43 @@ class MainWindow(QtWidgets.QMainWindow):
             self.solver.config.alpha,
         )
         self.cpplot.set_data(self.solver, cp_kj=cp_kj)
-        self.worker=SimulationThread(self.solver,self.field.currentText(),int(self.edits['frame_skip'].text())); self.worker.frame_ready.connect(self._frame); self.worker.failed.connect(lambda msg: QtWidgets.QMessageBox.critical(self,"Simulation stopped",msg)); self.worker.start()
+        self._worker_generation += 1
+        generation = self._worker_generation
+        self.worker=SimulationThread(self.solver,self.field.currentText(),int(self.edits['frame_skip'].text())); self.worker.frame_ready.connect(lambda field, stats, coeff, token=generation: self._frame_if_current(token, field, stats, coeff)); self.worker.failed.connect(lambda msg, token=generation: self._failure_if_current(token, msg)); self.worker.start()
         self._frame(self.solver.omega,self.solver.diagnostics(),None)
 
+    def _forget_worker(self, worker):
+        if worker in self._retired_workers:
+            self._retired_workers.remove(worker)
+            worker.deleteLater()
+    def _frame_if_current(self, generation, field, stats, coeff):
+        if generation == self._worker_generation:
+            self._frame(field, stats, coeff)
+    def _failure_if_current(self, generation, message):
+        if generation == self._worker_generation:
+            QtWidgets.QMessageBox.critical(self,"Simulation stopped",message)
     def _field_changed(self,name):
         if hasattr(self,'worker'): self.worker.set_field(name)
+    def _start_simulation(self):
+        if hasattr(self,'worker'): self.worker.resume()
+    def _pause_simulation(self):
+        if hasattr(self,'worker'): self.worker.pause()
     @QtCore.Slot(object,object,object)
     def _frame(self,field,stats,coeff):
         positive=self.field.currentText()=="Velocity magnitude"; self.view.set_rgb(self.renderer.render(field,positive))
         if coeff is not None:
             self.cpplot.set_data(self.solver, coeff['cp'], coeff['cp_kj'])
-        lines=[f"t = {stats['time']:.5f}   step {int(stats['step'])}",f"dt = {stats['dt']:.3e}   CFL = {stats['cfl']:.3f}",f"max |omega| = {stats['max_omega']:.3e}",f"max |u| = {stats['max_velocity']:.3f}",f"Gamma = {stats['gamma']:.4f}",f"Cl(KJ) = {stats['cl_kj']:.4f}",f"wall slip = {stats['wall_slip']:.3e}",f"energy-like = {stats['kinetic_energy']:.3e}"]
+        fps = int(stats.get('fps', 0))
+        lines=[f"t = {stats['time']:.5f}   step {int(stats['step'])}",f"dt = {stats['dt']:.3e}   CFL = {stats['cfl']:.3f}",f"FPS = {fps}",f"max |omega| = {stats['max_omega']:.3e}",f"max |u| = {stats['max_velocity']:.3f}",f"Gamma = {stats['gamma']:.4f}",f"Cl(KJ) = {stats['cl_kj']:.4f}",f"wall slip = {stats['wall_slip']:.3e}",f"energy-like = {stats['kinetic_energy']:.3e}"]
         if 'cl_pressure' in stats: lines.append(f"Cl(p) = {stats['cl_pressure']:.4f}\nCd(p) = {stats['cd_pressure']:.4f}")
         self.stats.setText("\n".join(lines))
     def closeEvent(self,event):
-        self.worker.shutdown=True; self.worker.wait(3000); super().closeEvent(event)
+        workers = [self.worker, *self._retired_workers]
+        for worker in workers:
+            worker.shutdown = True
+        for worker in workers:
+            worker.wait(3000)
+        super().closeEvent(event)
 
 
 def run_gui() -> int:

@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from joukowskisim.gui import CpPlot
+from joukowskisim.gui import CpPlot, MainWindow, _CumulativeFrameRate
 
 
 def test_cp_axis_fits_analytical_curve_but_rejects_viscous_spike():
@@ -17,3 +18,51 @@ def test_cp_axis_fits_analytical_curve_but_rejects_viscous_spike():
 def test_cp_axis_handles_missing_or_nonfinite_profiles():
     assert np.isclose(CpPlot._axis_limit(None, np.array([-1.2, 1.0])), 1.26)
     assert CpPlot._axis_limit(np.array([np.nan]), None) is None
+
+
+def test_cumulative_frame_rate_includes_pauses_and_resets():
+    now = [100.0]
+    counter = _CumulativeFrameRate(lambda: now[0])
+
+    counter.start()
+    now[0] = 101.0
+    frames, elapsed, fps = counter.record_frame()
+    assert frames == 1
+    assert elapsed == pytest.approx(1.0)
+    assert fps == pytest.approx(1.0)
+
+    # Starting again after a pause must retain the original wall-time epoch.
+    now[0] = 111.0
+    counter.start()
+    now[0] = 112.0
+    frames, elapsed, fps = counter.record_frame()
+    assert frames == 2
+    assert elapsed == pytest.approx(12.0)
+    assert fps == 0
+
+    counter.reset()
+    now[0] = 200.0
+    counter.start()
+    now[0] = 202.0
+    frames, elapsed, fps = counter.record_frame()
+    assert frames == 1
+    assert elapsed == pytest.approx(2.0)
+    assert fps == 1
+    assert isinstance(fps, int)
+
+
+def test_stale_worker_generation_cannot_replace_reset_frame():
+    class WindowProbe:
+        _worker_generation = 7
+
+        def __init__(self):
+            self.frames = []
+
+        def _frame(self, *frame):
+            self.frames.append(frame)
+
+    probe = WindowProbe()
+    MainWindow._frame_if_current(probe, 6, "old", {}, None)
+    MainWindow._frame_if_current(probe, 7, "new", {}, None)
+
+    assert probe.frames == [("new", {}, None)]

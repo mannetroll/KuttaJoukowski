@@ -30,3 +30,15 @@ def test_dealiasing_removes_high_modes():
     out=g.dealias((low+high)[None,:])[0]
     assert np.max(abs(out-low))<1e-12
 
+
+def test_nonlinear_tail_filter_preserves_low_radial_modes_and_filters_tail():
+    g = SpectralGrid(18, 48, 2)
+    x = 1.0 - 2.0 * g.s / g.s_max
+    low = np.cos(5 * np.arccos(x))[:, None] * np.sin(3 * g.theta)
+    highest = np.cos(17 * np.arccos(x))[:, None] * np.sin(3 * g.theta)
+
+    out = g.dealias_nonlinear(low + highest)
+
+    assert np.max(np.abs(out - low)) < 2e-12
+    assert g.radial_nonlinear_filter[5] == 1.0
+    assert g.radial_nonlinear_filter[-1] < 1e-14
