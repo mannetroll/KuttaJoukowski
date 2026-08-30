@@ -6,3 +6,4 @@
 6 | tune first-pass GCROT tolerance from 1e-7 to 3e-7 | 1.44959e-4 -> 1.50969e-4 (+4.1%) | kept
 7 | relax first-pass GCROT tolerance from 3e-7 to 1e-6 | 1.50969e-4 -> tests failed | reverted
 8 | use real FFTs for real-valued theta derivatives | 1.50969e-4 -> 1.66539e-4 (+10.3%) | kept
+9 | group nearby radial preconditioner profiles within 10 percent | 1.66539e-4 -> 2.12981e-4 (+27.9%) | kept

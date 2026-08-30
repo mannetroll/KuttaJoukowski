@@ -14,6 +14,12 @@ from .batched_lu import solve_cached_groups
 LS_IMEX_ALPHA = (8.0 / 15.0, 5.0 / 12.0, 3.0 / 4.0)
 LS_IMEX_BETA = (0.0, -17.0 / 60.0, -5.0 / 12.0)
 
+# This approximation is confined to the radial Krylov preconditioner.  The
+# production matrix-vector product and its independently evaluated residual
+# continue to use the complete, ungrouped mapped diffusion operator.
+RADIAL_PRECONDITIONER_PROFILE_TOLERANCE = 0.10
+_EXACT_MIRROR_TOLERANCE = 512.0 * np.finfo(float).eps
+
 
 class MappedImplicitDiffusion:
     """Complete mapped viscous operator treated by the implicit stages.
@@ -39,14 +45,18 @@ class MappedImplicitDiffusion:
 
 
 class RadialImplicitDiffusion:
-    """Cached grouped-angle LU solves for ``nu * H^-2 * d_ss``.
+    """Cached approximate radial preconditioner for mapped diffusion.
 
     The conformal metric makes the radial operator angle-dependent, but it
-    remains uncoupled between theta columns.  Mirror columns of a symmetric
-    metric share a factor and are solved as multiple right-hand sides; an
-    asymmetric metric automatically retains one factor per column.  Three
-    factor sets are cached for the LS-IMEX-RK3 diagonal coefficients and
-    rebuilt only when ``dt`` changes.
+    remains uncoupled between theta columns.  Exact mirror columns form the
+    initial groups.  Neighboring mirror orbits (or neighboring columns for an
+    asymmetric metric) may then share a representative factor only when their
+    complete radial coefficient profiles differ by at most 10 percent.  This
+    deliberately approximate inverse is used only as a Krylov preconditioner;
+    it does not alter the exact coupled stage operator or convergence check.
+
+    Three representative factor sets are cached for the LS-IMEX-RK3 diagonal
+    coefficients and rebuilt only when ``dt`` changes.
     """
 
     def __init__(self, grid, h2: np.ndarray, nu: float):
@@ -67,16 +77,29 @@ class RadialImplicitDiffusion:
         self.factor_seconds = 0.0
         self.solve_seconds = 0.0
 
-    def _build_factor_groups(self) -> tuple[tuple[int, ...], ...]:
-        """Return tightly matching mirror pairs, or singleton columns.
+    @staticmethod
+    def _profiles_match(
+        first: np.ndarray,
+        second: np.ndarray,
+        tolerance: float,
+    ) -> bool:
+        """Return whether complete radial profiles meet a relative bound."""
+        scale = np.maximum(
+            np.maximum(np.abs(first), np.abs(second)),
+            np.finfo(float).tiny,
+        )
+        return bool(np.all(np.abs(first - second) <= tolerance * scale))
+
+    def _build_exact_mirror_groups(self) -> tuple[tuple[int, ...], ...]:
+        """Return roundoff-equivalent mirror pairs or singleton columns.
 
         The symmetric Joukowski map produces coefficient columns ``j`` and
         ``-j`` that differ only by floating-point evaluation order.  Use a
         tight relative test over the complete radial profile before sharing a
         factor, so cambered/asymmetric geometries preserve their distinct
-        preconditioner matrices.
+        columns.  The scan order is also the natural mirror-orbit order for a
+        symmetric map: ``0, (1, -1), (2, -2), ...``.
         """
-        tolerance = 512.0 * np.finfo(float).eps
         groups: list[tuple[int, ...]] = []
         claimed = np.zeros(self.grid.ntheta, dtype=bool)
         for column in range(self.grid.ntheta):
@@ -86,8 +109,11 @@ class RadialImplicitDiffusion:
             if mirror != column and not claimed[mirror]:
                 first = self._coefficient[:, column]
                 second = self._coefficient[:, mirror]
-                scale = np.maximum(np.abs(first), np.abs(second))
-                if np.all(np.abs(first - second) <= tolerance * scale):
+                if self._profiles_match(
+                    first,
+                    second,
+                    _EXACT_MIRROR_TOLERANCE,
+                ):
                     groups.append((column, mirror))
                     claimed[column] = True
                     claimed[mirror] = True
@@ -95,6 +121,42 @@ class RadialImplicitDiffusion:
             groups.append((column,))
             claimed[column] = True
         return tuple(groups)
+
+    def _build_factor_groups(self) -> tuple[tuple[int, ...], ...]:
+        """Greedily merge adjacent exact groups within the profile bound.
+
+        Starting from exact mirror groups preserves symmetry without assuming
+        it.  On a symmetric map these are consecutive mirror orbits; on an
+        asymmetric map they naturally fall back to consecutive single theta
+        columns.  Every member is checked against the factored representative
+        over all interior radial nodes before a group is extended.
+        """
+        exact_groups = self._build_exact_mirror_groups()
+        merged: list[tuple[int, ...]] = []
+        current: list[int] = []
+        representative = -1
+        for exact_group in exact_groups:
+            if not current:
+                current = list(exact_group)
+                representative = exact_group[0]
+                continue
+            reference_profile = self._coefficient[:, representative]
+            if all(
+                self._profiles_match(
+                    reference_profile,
+                    self._coefficient[:, column],
+                    RADIAL_PRECONDITIONER_PROFILE_TOLERANCE,
+                )
+                for column in exact_group
+            ):
+                current.extend(exact_group)
+            else:
+                merged.append(tuple(current))
+                current = list(exact_group)
+                representative = exact_group[0]
+        if current:
+            merged.append(tuple(current))
+        return tuple(merged)
 
     def apply(self, field: np.ndarray) -> np.ndarray:
         """Apply radial diffusion, leaving boundary evolution to the closure."""
@@ -144,14 +206,16 @@ class RadialImplicitDiffusion:
         self.factor_seconds += time.perf_counter() - started
 
     def wall_response(self, stage: int) -> np.ndarray:
-        """Return the interior response to unit wall vorticity.
+        """Return the preconditioner's response to unit wall vorticity.
 
-        For a prepared stage this is
+        For each representative matrix this is
 
         ``(I - alpha*dt*L_II)^-1 alpha*dt*L_I0``.
 
-        It is diagonal in physical theta, so multiplying the returned array
-        by a wall vector broadcasts the complete interior influence field.
+        Group members use that representative inverse with their own exact
+        boundary forcing.  The response remains diagonal in physical theta,
+        so multiplying it by a wall vector broadcasts the complete interior
+        preconditioner influence field.
         """
         if self._dt is None or not self._wall_responses:
             raise RuntimeError("implicit radial factors have not been prepared")
@@ -164,7 +228,7 @@ class RadialImplicitDiffusion:
         wall: np.ndarray,
         outer: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Solve one implicit stage with supplied vorticity boundary guesses."""
+        """Apply the grouped radial preconditioner with supplied boundaries."""
         if self._dt is None or not self._factors:
             raise RuntimeError("implicit radial factors have not been prepared")
         started = time.perf_counter()
@@ -195,7 +259,11 @@ class RadialImplicitDiffusion:
         return np.ascontiguousarray(out)
 
     def residual(self, field: np.ndarray, rhs: np.ndarray, stage: int) -> float:
-        """Return the relative interior residual of the implicit stage solve."""
+        """Measure defect against the ungrouped radial operator.
+
+        This is generally nonzero for nonrepresentative columns because this
+        class intentionally applies an approximate preconditioner inverse.
+        """
         alpha_dt = LS_IMEX_ALPHA[stage] * float(self._dt or 0.0)
         defect = field - alpha_dt * self.apply(field) - rhs
         numerator = float(np.max(np.abs(defect[1:-1])))
@@ -206,16 +274,18 @@ class RadialImplicitDiffusion:
 class ThomWallInfluence:
     """Cached Schur complements for the local Thom wall closure.
 
-    A radial implicit solve is diagonal in physical theta: its response to a
-    wall-vorticity vector is ``R(s, theta) * omega_wall(theta)``.  The Poisson
-    solve couples those columns in theta.  If ``B`` is the local cubic Thom
-    operator, a stage must satisfy
+    The grouped radial preconditioner is diagonal in physical theta: its
+    response to a wall-vorticity vector is
+    ``R(s, theta) * omega_wall(theta)``.  The Poisson solve couples those
+    columns in theta.  If ``B`` is the local cubic Thom operator, the
+    preconditioner closure satisfies
 
     ``omega_wall = B(psi_base) + B(Poisson(R * omega_wall))``.
 
-    This class assembles and factors the dense ``I - B P R`` system once per
-    ``(dt, stage)``.  Unlike a direct wall-derivative projection, this system
-    tends continuously to the identity as ``dt`` tends to zero.
+    This class assembles and factors the dense ``I - B P R`` preconditioner
+    system once per ``(dt, stage)``.  Unlike a direct wall-derivative
+    projection, this system tends continuously to the identity as ``dt``
+    tends to zero.
     """
 
     def __init__(self, grid, h2: np.ndarray, poisson, radial):

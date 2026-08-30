@@ -308,11 +308,13 @@ class FlowSolver:
         rhs: np.ndarray,
         stage: int,
     ) -> np.ndarray:
-        """Apply the cached radial/Thom inverse used as a preconditioner.
+        """Apply the cached approximate radial/Thom preconditioner.
 
         Unlike the old stage routine, ``rhs[0]`` is an arbitrary right-hand
         side for the *linear* wall equation.  This makes the action suitable
         as a Krylov preconditioner for the coupled two-dimensional operator.
+        Nearby theta columns may share a representative radial factor; the
+        exact matrix action and residual are evaluated elsewhere.
         """
         zero_wall = np.zeros(self.config.ntheta, dtype=float)
         omega_base = self.radial_implicit.solve(
@@ -396,7 +398,7 @@ class FlowSolver:
             ).ravel(),
             dtype=float,
         )
-        # Applying the full radial/Thom preconditioner only to seed ``x0``
+        # Applying the grouped radial/Thom preconditioner only to seed ``x0``
         # costs one grouped-LU/Poisson solve per stage.  The unpreconditioned
         # linear RHS is already a close increment for these small IMEX stage
         # corrections; GCROT still applies the same preconditioner to its

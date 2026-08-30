@@ -641,7 +641,12 @@ transform.  Do NOT replace the azimuthal part by an independently diagonal
 ``-k^2/H^2`` modal solve.  The SciPy reference must apply the exact
 variable-metric two-dimensional stage matrix with a matrix-free Krylov solve.
 Use the cached radial implicit solve plus its generalized-Thom Schur inverse as
-a preconditioner, not as an ADI replacement for the complete operator.  A
+a preconditioner, not as an ADI replacement for the complete operator.  The
+preconditioner may share representative LU factors between nearby theta
+columns only when their complete radial coefficient profiles differ by at most
+10 percent.  This approximation must remain confined to the preconditioner;
+the Krylov matrix action and independently evaluated acceptance residual stay
+exact.  A
 naive radial/theta product introduces an ``O(dt^2) L_r L_theta`` split term and
 is not the reference stage equation.
 

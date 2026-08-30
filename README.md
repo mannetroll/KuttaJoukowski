@@ -24,9 +24,12 @@ Chebyshev--Gauss--Lobatto collocation, and time advancement uses the
 three-stage LS-IMEX-RK3 coefficients in `turbo_simulator.py`.  Advection and
 far-field sponge damping are explicit; the complete variable-metric viscous
 operator `nu H^-2 (d_ss + d_thetatheta)` is implicit.  Each stage uses a
-matrix-free GCROT solve of the coupled two-dimensional operator.  The
-cached radial/Thom Schur inverse is its preconditioner, and a cached two-row
-Poisson functional applies the wall equation cheaply inside Krylov products.
+matrix-free GCROT solve of the coupled two-dimensional operator.  Its cached
+radial/Thom preconditioner shares representative LU factors only between
+nearby theta columns whose complete radial coefficient profiles differ by at
+most 10 percent.  This approximation affects only the preconditioner; the
+coupled operator and residual remain exact.  A cached two-row Poisson
+functional applies the wall equation cheaply inside Krylov products.
 Consequently the production timestep is no longer set by either the
 `O(Nr^-4)` Chebyshev wall spacing or azimuthal diffusion.  Fourier two-thirds
 dealiasing is supplemented by a smooth Chebyshev-tail filter applied only to

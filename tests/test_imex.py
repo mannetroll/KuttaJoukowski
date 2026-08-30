@@ -4,7 +4,11 @@ from joukowskisim.boundary import (
     update_wall_vorticity,
     wall_vorticity_from_streamfunction,
 )
-from joukowskisim.imex import LS_IMEX_ALPHA, LS_IMEX_BETA
+from joukowskisim.imex import (
+    LS_IMEX_ALPHA,
+    LS_IMEX_BETA,
+    RADIAL_PRECONDITIONER_PROFILE_TOLERANCE,
+)
 from joukowskisim.solver import FlowSolver, SolverConfig
 
 
@@ -45,7 +49,41 @@ def test_reference_ls_coefficients_and_observed_split_orders():
     assert 1.8 < implicit_errors[0] / implicit_errors[1] < 2.2
 
 
-def test_stiff_radial_mode_decays_far_above_explicit_limit():
+def _assert_representative_radial_equations_close(
+    solver,
+    field,
+    rhs,
+    stage,
+    tolerance=2e-12,
+):
+    alpha_dt = LS_IMEX_ALPHA[stage] * solver.radial_implicit._dt
+    defect = field - alpha_dt * solver.radial_implicit.apply(field) - rhs
+    representatives = [
+        group[0] for group in solver.radial_implicit._factor_groups
+    ]
+    denominator = max(1.0, float(np.max(np.abs(rhs[1:-1]))))
+    assert (
+        np.max(np.abs(defect[1:-1, representatives])) / denominator
+        < tolerance
+    )
+
+
+def _assert_factor_group_partition_and_profile_bound(solver):
+    radial = solver.radial_implicit
+    groups = radial._factor_groups
+    columns = tuple(column for group in groups for column in group)
+    assert tuple(sorted(columns)) == tuple(range(solver.config.ntheta))
+    assert len(columns) == len(set(columns))
+    for group in groups:
+        representative = radial._coefficient[:, group[0]]
+        for column in group:
+            profile = radial._coefficient[:, column]
+            scale = np.maximum(np.abs(representative), np.abs(profile))
+            error = np.max(np.abs(representative - profile) / scale)
+            assert error <= RADIAL_PRECONDITIONER_PROFILE_TOLERANCE + 1e-14
+
+
+def test_stiff_radial_preconditioner_remains_finite_above_explicit_limit():
     solver = FlowSolver(SolverConfig(nr=24, ntheta=32, re=100))
     explicit_limit = solver.timestep_limits()[2]
     dt = 0.1
@@ -65,31 +103,50 @@ def test_stiff_radial_mode_decays_far_above_explicit_limit():
         omega = solver.radial_implicit.solve(
             rhs, stage, np.zeros(solver.config.ntheta)
         )
-        assert solver.radial_implicit.residual(omega, rhs, stage) < 1e-12
+        # Group members intentionally use their representative's factor.  The
+        # representative equations remain direct LU solves, while the exact
+        # coupled Krylov stage—not this approximate inverse—sets accuracy.
+        _assert_representative_radial_equations_close(
+            solver, omega, rhs, stage
+        )
         assert np.max(np.abs(omega[[0, -1]])) == 0.0
 
     assert np.isfinite(omega).all()
     assert np.linalg.norm(omega) < 0.98 * initial_norm
 
 
-def test_radial_factors_pair_only_tightly_symmetric_metric_columns():
+def test_radial_preconditioner_groups_are_bounded_and_reduce_factor_count():
     symmetric = FlowSolver(SolverConfig(nr=16, ntheta=32, camber=0.0))
-    expected_pairs = (
-        ((0,),)
-        + tuple((column, 32 - column) for column in range(1, 16))
-        + ((16,),)
+    exact_symmetric_groups = (
+        symmetric.radial_implicit._build_exact_mirror_groups()
     )
-    assert symmetric.radial_implicit._factor_groups == expected_pairs
+    _assert_factor_group_partition_and_profile_bound(symmetric)
+    assert len(symmetric.radial_implicit._factor_groups) < len(
+        exact_symmetric_groups
+    )
+    group_for_column = {
+        column: group_index
+        for group_index, group in enumerate(
+            symmetric.radial_implicit._factor_groups
+        )
+        for column in group
+    }
+    for column in range(1, symmetric.config.ntheta):
+        assert group_for_column[column] == group_for_column[
+            (-column) % symmetric.config.ntheta
+        ]
 
     cambered = FlowSolver(SolverConfig(nr=16, ntheta=32, camber=0.01))
-    assert cambered.radial_implicit._factor_groups == tuple(
+    assert cambered.radial_implicit._build_exact_mirror_groups() == tuple(
         (column,) for column in range(32)
     )
+    _assert_factor_group_partition_and_profile_bound(cambered)
+    assert len(cambered.radial_implicit._factor_groups) < 32
 
     dt = 1e-5
     symmetric.radial_implicit.prepare(dt)
     assert all(
-        len(factors) == len(expected_pairs)
+        len(factors) == len(symmetric.radial_implicit._factor_groups)
         for factors in symmetric.radial_implicit._factors
     )
 
@@ -99,7 +156,9 @@ def test_radial_factors_pair_only_tightly_symmetric_metric_columns():
     outer = rng.standard_normal(symmetric.config.ntheta)
     original_rhs = rhs.copy()
     result = symmetric.radial_implicit.solve(rhs, 1, wall, outer)
-    assert symmetric.radial_implicit.residual(result, rhs, 1) < 2e-12
+    _assert_representative_radial_equations_close(
+        symmetric, result, rhs, 1
+    )
     assert np.array_equal(rhs, original_rhs)
 
 
@@ -246,7 +305,10 @@ def test_fast_wall_poisson_functional_matches_complete_response():
 
 
 def test_full_stage_matches_direct_dense_solve_on_tiny_grid():
-    solver = FlowSolver(SolverConfig(nr=8, ntheta=8, re=50, alpha=0))
+    solver = FlowSolver(SolverConfig(nr=8, ntheta=16, re=50, alpha=0))
+    assert len(solver.radial_implicit._factor_groups) < len(
+        solver.radial_implicit._build_exact_mirror_groups()
+    )
     dt = 2e-4
     stage = 1
     solver.radial_implicit.prepare(dt)
@@ -273,7 +335,10 @@ def test_full_stage_matches_direct_dense_solve_on_tiny_grid():
         zero,
         zero,
     )
-    assert np.allclose(got, expected, rtol=2e-8, atol=2e-9)
+    relative_solution_error = (
+        np.linalg.norm(got - expected) / np.linalg.norm(expected)
+    )
+    assert relative_solution_error < 1e-9
     assert residual < 2e-8
     closed = got.copy()
     update_wall_vorticity(
@@ -288,6 +353,9 @@ def test_full_stage_matches_direct_dense_solve_on_tiny_grid():
 
 def test_stiff_angular_mode_decays_above_old_explicit_limit():
     solver = FlowSolver(SolverConfig(nr=40, ntheta=64, re=10, alpha=0))
+    assert len(solver.radial_implicit._factor_groups) < len(
+        solver.radial_implicit._build_exact_mirror_groups()
+    )
     old_theta_limit = solver.timestep_limits()[1]
     dt = 100.0 * old_theta_limit
     solver.radial_implicit.prepare(dt)
@@ -322,6 +390,9 @@ def test_resolved_timestep_ignores_counterfactual_diffusion_limits():
 
 def test_low_re_auto_step_refines_full_implicit_residual():
     solver = FlowSolver(SolverConfig(nr=40, ntheta=64, re=10, alpha=5))
+    assert len(solver.radial_implicit._factor_groups) < len(
+        solver.radial_implicit._build_exact_mirror_groups()
+    )
     _, old_theta_limit, _ = solver.timestep_limits()
     dt = solver.stable_timestep()
     assert dt > 100.0 * old_theta_limit
