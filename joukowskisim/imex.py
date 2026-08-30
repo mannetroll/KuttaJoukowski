@@ -6,7 +6,7 @@ import time
 import numpy as np
 from scipy import fft, linalg
 
-from .batched_lu import solve_cached_columns
+from .batched_lu import solve_cached_groups
 
 
 # Spalart/Moser/Rogers low-storage coefficients, matching the reference
@@ -39,12 +39,14 @@ class MappedImplicitDiffusion:
 
 
 class RadialImplicitDiffusion:
-    """Cached per-angle LU solves for ``nu * H^-2 * d_ss``.
+    """Cached grouped-angle LU solves for ``nu * H^-2 * d_ss``.
 
     The conformal metric makes the radial operator angle-dependent, but it
-    remains uncoupled between theta columns.  Three sets of factors are cached
-    for the LS-IMEX-RK3 diagonal coefficients and rebuilt only when ``dt``
-    changes.
+    remains uncoupled between theta columns.  Mirror columns of a symmetric
+    metric share a factor and are solved as multiple right-hand sides; an
+    asymmetric metric automatically retains one factor per column.  Three
+    factor sets are cached for the LS-IMEX-RK3 diagonal coefficients and
+    rebuilt only when ``dt`` changes.
     """
 
     def __init__(self, grid, h2: np.ndarray, nu: float):
@@ -56,6 +58,7 @@ class RadialImplicitDiffusion:
         self._wall_column = np.ascontiguousarray(grid.Dss[1:-1, 0])
         self._outer_column = np.ascontiguousarray(grid.Dss[1:-1, -1])
         self._coefficient = np.ascontiguousarray(self.nu / self.h2[1:-1])
+        self._factor_groups = self._build_factor_groups()
         self._identity = np.eye(grid.nr - 2)
         self._dt: float | None = None
         self._factors: list[list[tuple[np.ndarray, np.ndarray]]] = []
@@ -63,6 +66,35 @@ class RadialImplicitDiffusion:
         self.factorizations = 0
         self.factor_seconds = 0.0
         self.solve_seconds = 0.0
+
+    def _build_factor_groups(self) -> tuple[tuple[int, ...], ...]:
+        """Return tightly matching mirror pairs, or singleton columns.
+
+        The symmetric Joukowski map produces coefficient columns ``j`` and
+        ``-j`` that differ only by floating-point evaluation order.  Use a
+        tight relative test over the complete radial profile before sharing a
+        factor, so cambered/asymmetric geometries preserve their distinct
+        preconditioner matrices.
+        """
+        tolerance = 512.0 * np.finfo(float).eps
+        groups: list[tuple[int, ...]] = []
+        claimed = np.zeros(self.grid.ntheta, dtype=bool)
+        for column in range(self.grid.ntheta):
+            if claimed[column]:
+                continue
+            mirror = (-column) % self.grid.ntheta
+            if mirror != column and not claimed[mirror]:
+                first = self._coefficient[:, column]
+                second = self._coefficient[:, mirror]
+                scale = np.maximum(np.abs(first), np.abs(second))
+                if np.all(np.abs(first - second) <= tolerance * scale):
+                    groups.append((column, mirror))
+                    claimed[column] = True
+                    claimed[mirror] = True
+                    continue
+            groups.append((column,))
+            claimed[column] = True
+        return tuple(groups)
 
     def apply(self, field: np.ndarray) -> np.ndarray:
         """Apply radial diffusion, leaving boundary evolution to the closure."""
@@ -75,7 +107,7 @@ class RadialImplicitDiffusion:
         if self._dt == dt and self._factors:
             return
         started = time.perf_counter()
-        # Drop the old O(Ntheta*Nr^2) cache before constructing its replacement
+        # Drop the old O(Ngroup*Nr^2) cache before constructing its replacement
         # so an adaptive-dt rebuild does not require roughly twice the memory.
         self._factors = []
         self._wall_responses = []
@@ -91,15 +123,16 @@ class RadialImplicitDiffusion:
                 * self._wall_column[:, None]
             )
             response = np.empty_like(response_rhs)
-            for column in range(self.grid.ntheta):
+            for group in self._factor_groups:
+                column = group[0]
                 matrix = self._identity - scale * (
                     self._coefficient[:, column, None] * self._dii
                 )
                 factor = linalg.lu_factor(matrix, check_finite=False)
                 stage_factors.append(factor)
-                response[:, column] = linalg.lu_solve(
+                response[:, group] = linalg.lu_solve(
                     factor,
-                    response_rhs[:, column],
+                    response_rhs[:, group],
                     check_finite=False,
                 )
             factors.append(stage_factors)
@@ -149,8 +182,9 @@ class RadialImplicitDiffusion:
             rhs[1:-1]
             + alpha_dt * self._coefficient * boundary_second_derivative
         )
-        interior = solve_cached_columns(
+        interior = solve_cached_groups(
             self._factors[stage],
+            self._factor_groups,
             interior_rhs,
         )
         out = np.empty_like(rhs)

@@ -72,6 +72,37 @@ def test_stiff_radial_mode_decays_far_above_explicit_limit():
     assert np.linalg.norm(omega) < 0.98 * initial_norm
 
 
+def test_radial_factors_pair_only_tightly_symmetric_metric_columns():
+    symmetric = FlowSolver(SolverConfig(nr=16, ntheta=32, camber=0.0))
+    expected_pairs = (
+        ((0,),)
+        + tuple((column, 32 - column) for column in range(1, 16))
+        + ((16,),)
+    )
+    assert symmetric.radial_implicit._factor_groups == expected_pairs
+
+    cambered = FlowSolver(SolverConfig(nr=16, ntheta=32, camber=0.01))
+    assert cambered.radial_implicit._factor_groups == tuple(
+        (column,) for column in range(32)
+    )
+
+    dt = 1e-5
+    symmetric.radial_implicit.prepare(dt)
+    assert all(
+        len(factors) == len(expected_pairs)
+        for factors in symmetric.radial_implicit._factors
+    )
+
+    rng = np.random.default_rng(2718)
+    rhs = rng.standard_normal(symmetric.omega.shape)
+    wall = rng.standard_normal(symmetric.config.ntheta)
+    outer = rng.standard_normal(symmetric.config.ntheta)
+    original_rhs = rhs.copy()
+    result = symmetric.radial_implicit.solve(rhs, 1, wall, outer)
+    assert symmetric.radial_implicit.residual(result, rhs, 1) < 2e-12
+    assert np.array_equal(rhs, original_rhs)
+
+
 def test_cached_thom_schur_matches_direct_poisson_response():
     solver = FlowSolver(SolverConfig(nr=24, ntheta=32, re=200, alpha=7))
     dt = min(solver.stable_timestep(), 1e-4)

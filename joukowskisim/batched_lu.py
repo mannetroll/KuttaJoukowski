@@ -129,3 +129,106 @@ def solve_cached_columns(
             work[:, 0, :].T + 1j * work[:, 1, :].T
         )
     return np.ascontiguousarray(out)
+
+
+def solve_cached_groups(
+    factors: list[tuple[np.ndarray, np.ndarray]],
+    column_groups: tuple[tuple[int, ...], ...],
+    rhs: np.ndarray,
+) -> np.ndarray:
+    """Solve groups of columns that share one cached LU factor.
+
+    Each group is passed to LAPACK as a multi-right-hand-side solve.  This is
+    useful when symmetry makes several independent column matrices identical:
+    it reduces both factor storage and Python/LAPACK call overhead without
+    changing any right-hand side.  Groups must form a partition of the RHS
+    columns, and the caller's array is never overwritten.
+    """
+    values = np.asarray(rhs)
+    if values.ndim != 2 or len(factors) != len(column_groups):
+        raise ValueError("cached LU groups have the wrong shape")
+    if not factors:
+        if values.shape[1] != 0:
+            raise ValueError("cached LU groups do not cover the RHS columns")
+        return np.empty_like(values)
+
+    columns = tuple(column for group in column_groups for column in group)
+    if (
+        any(not group for group in column_groups)
+        or len(columns) != values.shape[1]
+        or tuple(sorted(columns)) != tuple(range(values.shape[1]))
+    ):
+        raise ValueError("cached LU groups must partition the RHS columns")
+
+    split_complex = (
+        np.iscomplexobj(values)
+        and not np.iscomplexobj(factors[0][0])
+    )
+    getrs = linalg.lapack.get_lapack_funcs(
+        "getrs",
+        (factors[0][0],) if split_complex else (factors[0][0], values),
+    )
+    out = np.empty(
+        values.shape,
+        dtype=np.result_type(values.dtype, factors[0][0].dtype),
+    )
+
+    def solve_range(bounds: tuple[int, int]) -> None:
+        start, stop = bounds
+        for group_index in range(start, stop):
+            group = column_groups[group_index]
+            lu, pivots = factors[group_index]
+            if split_complex:
+                group_size = len(group)
+                work = np.empty(
+                    (values.shape[0], 2 * group_size),
+                    dtype=lu.dtype,
+                    order="F",
+                )
+                work[:, :group_size] = values[:, group].real
+                work[:, group_size:] = values[:, group].imag
+                solution, info = getrs(
+                    lu,
+                    pivots,
+                    work,
+                    trans=0,
+                    overwrite_b=True,
+                )
+                if info == 0:
+                    out[:, group] = (
+                        solution[:, :group_size]
+                        + 1j * solution[:, group_size:]
+                    )
+            else:
+                work = np.array(
+                    values[:, group],
+                    dtype=out.dtype,
+                    order="F",
+                    copy=True,
+                )
+                solution, info = getrs(
+                    lu,
+                    pivots,
+                    work,
+                    trans=0,
+                    overwrite_b=True,
+                )
+                if info == 0:
+                    out[:, group] = solution
+            if info != 0:
+                raise RuntimeError(
+                    f"cached LAPACK solve failed in group {group_index} "
+                    f"with info={info}"
+                )
+
+    if _EXECUTOR is None or values.shape[1] < _PARALLEL_COLUMNS:
+        solve_range((0, len(column_groups)))
+    else:
+        # Materialize the iterator so worker exceptions are raised here.
+        tuple(
+            _EXECUTOR.map(
+                solve_range,
+                _column_chunks(len(column_groups), _WORKERS),
+            )
+        )
+    return np.ascontiguousarray(out)

@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import linalg
 
-from joukowskisim.batched_lu import solve_cached_columns
+from joukowskisim.batched_lu import solve_cached_columns, solve_cached_groups
 
 
 def _factors(count: int, size: int):
@@ -68,4 +68,26 @@ def test_complex_lu_promotes_real_rhs_without_mutating_it():
 
     assert np.iscomplexobj(got)
     assert np.allclose(got, expected, rtol=2e-13, atol=2e-13)
+    assert np.array_equal(rhs, original)
+
+
+def test_grouped_cached_lu_matches_individual_solves_without_mutating_rhs():
+    count, size = 200, 6  # Exercises grouped multi-RHS and parallel paths.
+    groups = tuple((column, count - 1 - column) for column in range(count // 2))
+    factors = _factors(len(groups), size)
+    rhs = np.asfortranarray(
+        np.random.default_rng(31415).standard_normal((size, count))
+    )
+    expected = np.empty_like(rhs)
+    for factor, group in zip(factors, groups):
+        expected[:, group] = linalg.lu_solve(
+            factor,
+            rhs[:, group],
+            check_finite=False,
+        )
+
+    original = rhs.copy()
+    got = solve_cached_groups(factors, groups, rhs)
+
+    assert np.array_equal(got, expected)
     assert np.array_equal(rhs, original)
