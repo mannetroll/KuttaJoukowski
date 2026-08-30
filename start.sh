@@ -42,7 +42,6 @@ fi
 codex_command=(
     codex
     --approve-for-me
-    --sandbox workspace-write
     -C "${SCRIPT_DIR}"
     --add-dir "${UV_CACHE_DIR}"
     exec

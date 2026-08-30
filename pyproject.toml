@@ -1,0 +1,28 @@
+[project]
+name = "joukowskisim"
+version = "0.1.0"
+description = "Body-fitted conformal spectral Navier-Stokes airfoil simulator"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "numpy>=2.1",
+  "scipy>=1.14",
+  "PySide6>=6.8",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3"]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[project.scripts]
+simulation = "joukowskisim.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

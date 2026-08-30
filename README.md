@@ -1,0 +1,42 @@
+# JoukowskiSim
+
+JoukowskiSim solves the two-dimensional incompressible vorticity equation on a
+body-fitted conformal grid.  The auxiliary domain is the exterior of an offset
+circle, with logarithmic radius and a periodic angle.  A regularized Joukowski
+map turns the inner coordinate line into a finite-thickness airfoil.
+
+```bash
+uv sync --extra test
+uv run simulation
+uv run python -m joukowskisim.main --headless --steps 100
+uv run pytest -q
+```
+
+The default 160 x 512 case is intended for interactive desktop use.  Start with
+64 x 128 for quick experiments.  This is a two-dimensional laminar/unsteady
+research solver, not a high-Reynolds-number engineering turbulence model.
+
+The solver advances
+`omega_t + (psi_s omega_theta - psi_theta omega_s)/H^2 = nu Delta_c omega/H^2`
+and solves `Delta_c psi = -H^2 omega`, where `H=r|f'(zeta)|`.  Fourier
+derivatives use multithreaded SciPy FFTs, radial derivatives use
+Chebyshev--Gauss--Lobatto collocation, and time advancement is dealiased
+explicit SSPRK3.  The timestep includes mapped advective and viscous limits.
+
+The default circle is centered slightly left of the origin.  Its rightmost
+point is separated from the Joukowski critical point by `te_gap=0.015`, giving
+a thin finite trailing edge and a strictly positive metric.  The wall is the
+exact `s=0` coordinate line.  A cubic generalized Thom reconstruction supplies
+wall vorticity; outer vorticity is zero, with a far-boundary sponge in the last
+15 percent of the logarithmic radius.  Circulation is reported clockwise
+positive for the displayed `Cl_KJ=2 Gamma/U` convention.
+
+Pressure is reconstructed from the velocity-gradient pressure Poisson source,
+with homogeneous wall-normal pressure derivative and zero outer reference.
+The GUI performs cached inverse-map interpolation into a physical Cartesian
+raster and uses Qt-native painting for the airfoil and Cp curves.
+
+Known limitations are the finite (regularized) trailing edge, approximate wall
+vorticity closure, finite outer boundary, and the severe explicit viscous CFL
+from Chebyshev wall clustering.  High-Re cases require resolution and small
+timesteps; no turbulence model is supplied.
