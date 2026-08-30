@@ -410,7 +410,7 @@ class FlowSolver:
             m=10,
             k=5,
             maxiter=30,
-            rtol=1e-7,
+            rtol=3e-7,
             atol=0.0,
         )
         if info != 0:
