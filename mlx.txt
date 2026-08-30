@@ -41,7 +41,35 @@
 
 
 ----------------------------------------
+----------------------------------------
+----------------------------------------
 
 For your specific case, I think a Codex-driven OpenFOAM RSM laboratory is more compelling than writing another standalone CFD code: implement LRR/SSG first as known baselines, reproduce canonical cases, then insert your nonlinear closures and let the agent run systematic regression against DNS datasets. That is exactly the sort of formerly tedious research workflow that current coding agents can substantially accelerate.
+
+
+----------------------------------------
+----------------------------------------
+----------------------------------------
+
+› FULL-AUTO!
+
+  You are optimizing the solver!
+
+  1. Run the baseline benchmark and record the current <metric>.
+  2. Profile or analyze to identify the single biggest bottleneck.
+  3. Propose ONE concrete change. State your hypothesis for why it will help.
+  4. Implement the change.
+  5. Run tests. If they fail, revert and try a different change.
+  6. Re-run the benchmark. Compare to the previous best.
+  7. If improved, commit with a message describing the change and the delta.
+     If not improved, revert.
+  8. Append a one-line summary to optimization_log.md:
+     <iteration> | <change> | <before> -> <after> | kept/reverted
+  9. Continue.
+
+  Do not ask for confirmation between iterations. Do not stop early to summarize
+  unless the stopping condition is met. Report the final best version and the log
+  when done.
+
 
 
