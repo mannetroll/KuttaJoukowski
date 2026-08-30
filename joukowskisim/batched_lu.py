@@ -172,9 +172,38 @@ def solve_cached_groups(
         values.shape,
         dtype=np.result_type(values.dtype, factors[0][0].dtype),
     )
+    if _EXECUTOR is None or values.shape[1] < _PARALLEL_COLUMNS:
+        ranges = ((0, len(column_groups)),)
+    else:
+        ranges = _column_chunks(len(column_groups), _WORKERS)
+    # Real-valued stages dominate the mapped implicit preconditioner.  Give
+    # each parallel range one reusable C-order scratch slab; transposing a
+    # populated (group, rows) slice gives LAPACK the F-contiguous
+    # (rows, group) multi-RHS matrix it expects.  This avoids allocating and
+    # freeing one temporary array for every group while keeping worker writes
+    # disjoint.  The split-complex path retains its paired real/imag layout.
+    real_workspace = (
+        None
+        if split_complex
+        else np.empty(
+            (
+                len(ranges),
+                max(len(group) for group in column_groups),
+                values.shape[0],
+            ),
+            dtype=out.dtype,
+            order="C",
+        )
+    )
 
-    def solve_range(bounds: tuple[int, int]) -> None:
+    def solve_range(task: tuple[int, tuple[int, int]]) -> None:
+        workspace_index, bounds = task
         start, stop = bounds
+        scratch = (
+            None
+            if real_workspace is None
+            else real_workspace[workspace_index]
+        )
         for group_index in range(start, stop):
             group = column_groups[group_index]
             lu, pivots = factors[group_index]
@@ -200,35 +229,29 @@ def solve_cached_groups(
                         + 1j * solution[:, group_size:]
                     )
             else:
-                work = np.array(
-                    values[:, group],
-                    dtype=out.dtype,
-                    order="F",
-                    copy=True,
-                )
+                group_size = len(group)
+                for local_column, source_column in enumerate(group):
+                    scratch[local_column] = values[:, source_column]
                 solution, info = getrs(
                     lu,
                     pivots,
-                    work,
+                    scratch[:group_size].T,
                     trans=0,
                     overwrite_b=True,
                 )
                 if info == 0:
-                    out[:, group] = solution
+                    for local_column, destination_column in enumerate(group):
+                        out[:, destination_column] = solution[:, local_column]
             if info != 0:
                 raise RuntimeError(
                     f"cached LAPACK solve failed in group {group_index} "
                     f"with info={info}"
                 )
 
-    if _EXECUTOR is None or values.shape[1] < _PARALLEL_COLUMNS:
-        solve_range((0, len(column_groups)))
+    tasks = tuple(enumerate(ranges))
+    if len(tasks) == 1:
+        solve_range(tasks[0])
     else:
         # Materialize the iterator so worker exceptions are raised here.
-        tuple(
-            _EXECUTOR.map(
-                solve_range,
-                _column_chunks(len(column_groups), _WORKERS),
-            )
-        )
+        tuple(_EXECUTOR.map(solve_range, tasks))
     return np.ascontiguousarray(out)

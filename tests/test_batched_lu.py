@@ -91,3 +91,44 @@ def test_grouped_cached_lu_matches_individual_solves_without_mutating_rhs():
 
     assert np.array_equal(got, expected)
     assert np.array_equal(rhs, original)
+
+
+def test_grouped_cached_lu_supports_mixed_group_sizes_and_c_order_rhs():
+    size = 7
+    groups = ((0, 7, 3), (1,), (2, 6), (4, 5))
+    factors = _factors(len(groups), size)
+    rhs = np.random.default_rng(2718).standard_normal((size, 8))
+    expected = np.empty_like(rhs)
+    for factor, group in zip(factors, groups):
+        expected[:, group] = linalg.lu_solve(
+            factor,
+            rhs[:, group],
+            check_finite=False,
+        )
+
+    original = rhs.copy()
+    got = solve_cached_groups(factors, groups, rhs)
+
+    assert np.array_equal(got, expected)
+    assert np.array_equal(rhs, original)
+
+
+def test_grouped_real_lu_preserves_split_complex_path():
+    size = 6
+    groups = ((0, 5), (1,), (2, 3, 4))
+    factors = _factors(len(groups), size)
+    rng = np.random.default_rng(1618)
+    rhs = rng.standard_normal((size, 6)) + 1j * rng.standard_normal((size, 6))
+    expected = np.empty_like(rhs)
+    for factor, group in zip(factors, groups):
+        expected[:, group] = linalg.lu_solve(
+            factor,
+            rhs[:, group],
+            check_finite=False,
+        )
+
+    original = rhs.copy()
+    got = solve_cached_groups(factors, groups, rhs)
+
+    assert np.allclose(got, expected, rtol=2e-13, atol=2e-13)
+    assert np.array_equal(rhs, original)
