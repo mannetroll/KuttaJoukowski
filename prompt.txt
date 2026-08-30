@@ -1,0 +1,1402 @@
+Do not ask clarifying questions.
+Do not use web search or external resources.
+Make reasonable mathematical, numerical, and implementation choices.
+
+Implement the complete solution.
+Run tests, fix failures, and repeat until all tests pass.
+At the end, give a concise summary of:
+- the mathematical formulation,
+- the conformal mapping,
+- the numerical method,
+- the GUI,
+- the tests,
+- known limitations,
+- and how to run it.
+
+Create a complete 2D incompressible Navier–Stokes airfoil solver in Python 3.13 using a conformal Joukowski-type mapping, a vorticity–streamfunction formulation, SciPy multithreaded FFTs, NumPy, and PySide6.
+
+The purpose is to solve viscous unsteady flow around an airfoil on a body-fitted spectral grid obtained by conformally mapping a simple circular computational domain into an airfoil-shaped physical domain.
+
+The solver must visibly reproduce:
+- circulation around the airfoil,
+- stagnation regions,
+- boundary-layer development,
+- wake formation,
+- vorticity generation at the airfoil surface,
+- separated flow when the angle of attack / Reynolds number is high enough,
+- vortex shedding when appropriate,
+- and a physically meaningful pressure coefficient Cp distribution.
+
+The airfoil geometry must NOT be represented by a Cartesian mask or Brinkman penalization.
+The airfoil surface must be an exact coordinate boundary of the transformed computational domain.
+
+PROJECT
+=======
+
+Create a uv/pyproject.toml project with root package:
+
+    joukowskisim
+
+Launch the GUI with:
+
+    uv run simulation
+
+Use:
+
+    Python 3.13
+    numpy
+    scipy
+    PySide6
+
+Do not use:
+- PyTorch
+- TensorFlow
+- JAX
+- CuPy
+- MLX
+- OpenCV
+- numba
+- matplotlib for the live GUI renderer
+- external CFD packages
+
+SciPy FFT must be used for spectral transforms.
+
+Use multithreaded SciPy FFT calls where possible, for example:
+
+    scipy.fft.fft(..., workers=-1)
+    scipy.fft.ifft(..., workers=-1)
+    scipy.fft.rfft(..., workers=-1)
+    scipy.fft.irfft(..., workers=-1)
+
+If a multidimensional FFT is appropriate, use scipy.fft with workers=-1.
+
+============================================================
+PHYSICAL PROBLEM
+============================================================
+
+Solve the 2D incompressible Navier–Stokes equations around an airfoil.
+
+Use a vorticity–streamfunction formulation.
+
+Physical coordinates:
+
+    z = x + i y
+
+Velocity:
+
+    u = dpsi/dy
+    v = -dpsi/dx
+
+Vorticity:
+
+    omega = dv/dx - du/dy
+
+Governing equations:
+
+    d omega / dt + J(psi, omega) = nu * Laplacian(omega)
+
+    Laplacian(psi) = -omega
+
+where
+
+    J(psi, omega)
+      = dpsi/dx * domega/dy
+      - dpsi/dy * domega/dx
+
+No pressure projection should be required for time integration.
+
+Recover pressure afterward for visualization and Cp calculation.
+
+Use:
+
+    Re = U_inf * c / nu
+
+with default:
+
+    U_inf = 1.0
+    chord = 1.0
+    Re = 1000
+    alpha = 5 degrees
+
+and therefore:
+
+    nu = U_inf * chord / Re
+
+Support GUI-editable values for at least:
+
+    Re
+    alpha
+    U_inf
+    Nr
+    Ntheta
+    CFL
+    outer-domain radius
+    visualization field
+    frame skip
+
+============================================================
+CONFORMAL AIRFOIL MAPPING
+============================================================
+
+Use a Joukowski-type conformal mapping.
+
+Begin with a circle in the auxiliary complex plane:
+
+    zeta = xi + i eta
+
+The basic Joukowski transform is:
+
+    z = zeta + a^2 / zeta
+
+but do NOT restrict the implementation to a centered circle if that only creates a symmetric flat-plate-like geometry.
+
+Use an offset circle:
+
+    zeta(theta) = zeta_c + R * exp(i theta)
+
+and choose zeta_c and R such that the mapped contour forms a proper finite-thickness cambered or symmetric airfoil.
+
+The implementation must expose a clean AirfoilMapping class.
+
+It should provide functions equivalent to:
+
+    zeta(s, theta)
+    z(s, theta)
+    dz_dzeta(zeta)
+    metric(s, theta)
+    surface_xy()
+    computational_to_physical(...)
+    velocity_computational_to_physical(...)
+
+Normalize the resulting airfoil so that:
+
+    leading edge x approximately 0
+    trailing edge x approximately 1
+    chord approximately 1
+
+The angle of attack must be implemented through the free-stream orientation, not by rotating the numerical grid unnecessarily.
+
+============================================================
+COMPUTATIONAL COORDINATES
+============================================================
+
+Use polar coordinates around the generating circle.
+
+Represent the auxiliary-domain radial coordinate as:
+
+    zeta = zeta_c + r * exp(i theta)
+
+Use a logarithmic radial coordinate:
+
+    s = ln(r / R)
+
+so that:
+
+    s = 0
+
+corresponds exactly to the airfoil surface.
+
+The computational domain becomes:
+
+    0 <= s <= s_max
+    0 <= theta < 2*pi
+
+where theta is periodic.
+
+The physical outer radius should be sufficiently large to approximate free stream.
+
+Default outer-domain radius should be approximately:
+
+    10 to 20 chord lengths
+
+or an equivalent value in the auxiliary plane chosen consistently with the mapping.
+
+============================================================
+METRIC
+============================================================
+
+For the conformal map:
+
+    z = f(zeta)
+
+define:
+
+    h = |df/dzeta|
+
+With logarithmic radial coordinate, define the combined metric factor H:
+
+    H = r * |df/dzeta|
+
+so that:
+
+    Laplacian_z(phi)
+      = (1/H^2) * (phi_ss + phi_thetatheta)
+
+Derive and implement all metric factors carefully.
+
+Do NOT approximate derivatives of the mapping numerically if closed-form expressions are available.
+
+For the Joukowski transform:
+
+    f(zeta) = zeta + a^2/zeta
+
+    f'(zeta) = 1 - a^2/zeta^2
+
+Use analytical expressions.
+
+Store metric arrays as contiguous NumPy arrays.
+
+Validate that metric values are finite throughout the numerical domain except where an exact Joukowski cusp would cause a singularity.
+
+============================================================
+TRAILING EDGE
+============================================================
+
+The exact Joukowski cusp can make:
+
+    f'(zeta) -> 0
+
+at the trailing edge.
+
+Do NOT allow an unresolved singular metric to destroy the solver.
+
+Implement one numerically robust strategy.
+
+Preferred strategy:
+
+Use a slightly regularized Joukowski/Kármán–Trefftz-like configuration that produces a very thin but finite trailing-edge angle rather than an exact mathematical cusp.
+
+If using the pure Joukowski transform, regularize the metric in a mathematically controlled way and clearly document it.
+
+The implementation must contain tests ensuring:
+
+    no NaN metric values
+    no Inf metric values
+    no catastrophic timestep collapse at the trailing edge
+
+Do not simply clip arbitrary large values without documenting and justifying the numerical treatment.
+
+============================================================
+SPECTRAL DISCRETIZATION
+============================================================
+
+Use a hybrid spectral method.
+
+Theta direction:
+    Fourier spectral
+
+Radial/log-radius direction:
+    Chebyshev collocation
+
+Recommended default:
+
+    Ntheta = 512
+    Nr = 160
+
+Support smaller test configurations such as:
+
+    Ntheta = 128
+    Nr = 64
+
+and larger configurations such as:
+
+    Ntheta = 1024
+    Nr = 256
+
+Theta derivatives must use FFT.
+
+For a field f(s, theta):
+
+    f_theta
+    f_thetatheta
+
+must be computed spectrally with scipy.fft.
+
+Use Fourier wavenumbers generated consistently with a 2*pi-periodic domain.
+
+Radial derivatives:
+
+    f_s
+    f_ss
+
+must use Chebyshev differentiation matrices or an equivalent stable Chebyshev spectral operator.
+
+Avoid constructing unnecessary dense operations inside every timestep.
+
+Precompute:
+
+    Chebyshev nodes
+    first derivative matrix
+    second derivative matrix
+    theta wavenumbers
+    dealiasing mask
+    mapping coordinates
+    metric arrays
+    surface geometry
+
+============================================================
+CHEBYSHEV GRID
+============================================================
+
+Use Chebyshev–Gauss–Lobatto nodes.
+
+Map:
+
+    x_cheb in [-1, 1]
+
+to:
+
+    s in [0, s_max]
+
+Ensure:
+
+    s = 0
+
+is exactly the airfoil wall.
+
+Use the node clustering near the airfoil to resolve the viscous boundary layer.
+
+Be careful with node ordering.
+
+Make sure all operators consistently use the same wall-to-farfield ordering.
+
+============================================================
+VORTICITY–STREAMFUNCTION EQUATIONS
+============================================================
+
+Using the conformal metric H:
+
+    psi_ss + psi_thetatheta = -H^2 * omega
+
+and
+
+    d omega/dt
+      + (1/H^2) *
+        (psi_s * omega_theta - psi_theta * omega_s)
+      =
+        nu/H^2 *
+        (omega_ss + omega_thetatheta)
+
+Implement this formulation explicitly.
+
+Verify signs carefully against the definitions:
+
+    u = psi_y
+    v = -psi_x
+
+    omega = dv/dx - du/dy
+
+Do not silently change conventions between modules.
+
+============================================================
+STREAMFUNCTION POISSON SOLVER
+============================================================
+
+At every required stage, solve:
+
+    psi_ss + psi_thetatheta
+      = -H^2 * omega
+
+Exploit the Fourier direction.
+
+Transform RHS in theta using scipy.fft.
+
+For each Fourier mode k:
+
+    psi_hat_ss - k^2 * psi_hat
+      = rhs_hat
+
+Solve the resulting 1D Chebyshev boundary-value problem.
+
+Precompute one radial linear operator/factorization per unique |k| where practical.
+
+Use:
+
+    scipy.linalg
+
+for LU factorization / solve if appropriate.
+
+Do not invert matrices explicitly.
+
+The streamfunction solve should be one of the most optimized parts of the implementation.
+
+============================================================
+FAR-FIELD CONDITIONS
+============================================================
+
+Impose uniform free-stream flow at angle alpha.
+
+Physical free-stream velocity:
+
+    Ux = U_inf * cos(alpha)
+    Uy = U_inf * sin(alpha)
+
+The far-field streamfunction in Cartesian coordinates is:
+
+    psi_inf = Ux * y - Uy * x
+
+up to an arbitrary constant.
+
+Evaluate this on the mapped outer boundary and impose it as the outer Dirichlet condition for psi.
+
+At the wall, streamfunction must be constant because the wall is impermeable.
+
+Set:
+
+    psi_wall = constant
+
+Choose the constant consistently.
+
+Allow circulation to develop dynamically due to the no-slip viscous boundary rather than prescribing an inviscid Kutta circulation directly.
+
+============================================================
+NO-SLIP WALL CONDITION
+============================================================
+
+This is critical.
+
+The airfoil surface is:
+
+    s = 0
+
+Impose:
+
+    u = 0
+    v = 0
+
+at the wall.
+
+In streamfunction form:
+
+    psi = constant
+
+provides no penetration, but no-slip additionally requires the correct wall vorticity.
+
+Implement a stable wall-vorticity boundary condition based on the streamfunction near the wall.
+
+Use a high-order spectral/generalized Thom-type relation compatible with the Chebyshev discretization.
+
+Do NOT simply set:
+
+    omega_wall = 0
+
+because that is physically incorrect.
+
+The implementation must clearly isolate this logic in a function such as:
+
+    update_wall_vorticity(...)
+
+Test that wall tangential velocity approaches zero to numerical accuracy.
+
+============================================================
+OUTER VORTICITY CONDITION
+============================================================
+
+At the far field:
+
+    omega = 0
+
+or use a consistent weak/open outer condition.
+
+For the default large outer radius, zero far-field vorticity is acceptable.
+
+Add an optional damping layer near the outer boundary if needed to absorb outward-moving vortical disturbances.
+
+If a sponge is implemented, it must operate only near the far boundary and not contaminate the airfoil flow.
+
+============================================================
+NONLINEAR TERM
+============================================================
+
+Compute:
+
+    N =
+      (1/H^2) *
+      (psi_s * omega_theta - psi_theta * omega_s)
+
+using pseudo-spectral evaluation.
+
+Use 2/3 dealiasing in the periodic theta direction.
+
+At minimum:
+
+    transform nonlinear quantity to Fourier space
+    zero modes above 2/3 cutoff
+    transform back
+
+Prefer dealiasing of participating derivative/product fields consistently.
+
+Avoid aliasing-driven instability.
+
+============================================================
+TIME INTEGRATION
+============================================================
+
+Use a robust low-storage third-order Runge–Kutta method.
+
+Preferred:
+
+    SSPRK3
+
+or a documented low-storage RK3.
+
+Treat the nonlinear advection explicitly.
+
+For moderate Reynolds number, explicit viscous integration may be acceptable at smaller grids, but the default production solver should avoid a timestep dominated unnecessarily by Chebyshev wall clustering.
+
+Preferred production method:
+
+    IMEX RK3
+
+or
+
+    integrating-factor / semi-implicit viscous treatment
+
+where the stiff radial diffusion contribution is treated implicitly if reasonably implementable.
+
+If implementing fully explicit RK3 initially, compute and enforce both:
+
+    advective CFL condition
+    diffusive stability condition
+
+and choose:
+
+    dt = safety * min(dt_adv, dt_diff)
+
+The application must remain stable for its documented default case.
+
+============================================================
+CFL
+============================================================
+
+Compute a physically meaningful local timestep using mapped-grid cell scales.
+
+Approximate local coordinate cell lengths with the metric:
+
+    dx_s approximately H * ds
+    dx_theta approximately H * dtheta
+
+Then constrain:
+
+    dt_adv approximately CFL *
+      min(
+        dx_s / |u_s|,
+        dx_theta / |u_theta|
+      )
+
+or an equivalent correct formulation using contravariant coordinate velocities.
+
+Also include viscous stability if diffusion is explicit.
+
+Default:
+
+    CFL = 0.4
+
+Display:
+
+    current dt
+    CFL estimate
+
+in the GUI.
+
+============================================================
+VELOCITY RECOVERY
+============================================================
+
+Recover computational coordinate velocity components from psi.
+
+For conformal coordinates with equal scale factor H:
+
+    q_s      = (1/H) * psi_theta
+    q_theta  = -(1/H) * psi_s
+
+subject to the chosen sign convention.
+
+Then rotate/transform these components into physical Cartesian:
+
+    u(x,y)
+    v(x,y)
+
+using the analytical coordinate basis vectors from the conformal mapping.
+
+Implement this transformation carefully and test it against a known uniform-flow streamfunction.
+
+============================================================
+PRESSURE
+============================================================
+
+Pressure is not needed to advance the vorticity equation, but it is needed for Cp.
+
+Recover pressure periodically, not necessarily every timestep.
+
+Use the incompressible pressure Poisson equation:
+
+    Laplacian(p)
+      =
+      -rho *
+      [
+        (du/dx)^2
+        + 2*(du/dy)*(dv/dx)
+        + (dv/dy)^2
+      ]
+
+or an equivalent divergence-of-momentum formulation.
+
+Solve this in transformed coordinates.
+
+Use:
+
+    rho = 1
+
+unless exposed otherwise.
+
+Set a far-field pressure reference:
+
+    p_inf = 0
+
+Pressure recovery may be computed only every visualization frame to reduce cost.
+
+============================================================
+PRESSURE COEFFICIENT
+============================================================
+
+Compute surface pressure coefficient:
+
+    Cp =
+      (p_surface - p_inf) /
+      (0.5 * rho * U_inf^2)
+
+Display Cp around the airfoil.
+
+Also provide a chordwise Cp plot with:
+
+    upper surface
+    lower surface
+
+against:
+
+    x/c
+
+Use the conventional inverted Cp plotting option if desired, but label it clearly.
+
+============================================================
+CIRCULATION AND LIFT
+============================================================
+
+Compute circulation around a closed contour surrounding the airfoil:
+
+    Gamma = integral(u dx + v dy)
+
+or equivalently by integrating vorticity over the domain if numerically convenient.
+
+Compute an approximate lift coefficient from:
+
+    Cl_KJ = 2 * Gamma / (U_inf * chord)
+
+with sign convention documented.
+
+Also compute pressure-based lift if pressure is available:
+
+    Cl_pressure
+
+Display both where practical.
+
+Do not claim exact agreement at finite Reynolds number.
+
+============================================================
+DRAG
+============================================================
+
+Compute approximate pressure drag.
+
+If wall-vorticity / wall-shear reconstruction is reliable, optionally include viscous skin-friction drag.
+
+Display:
+
+    Cd_pressure
+    Cd_viscous
+    Cd_total
+
+only if the implementation supports them robustly.
+
+Otherwise display pressure drag only and label it accurately.
+
+============================================================
+INITIAL CONDITION
+============================================================
+
+Initialize from uniform free-stream flow around the mapped body.
+
+Preferred:
+
+Construct an inviscid potential-flow streamfunction around the generating circle at the selected angle of attack, transformed into the physical domain.
+
+Alternatively, start from a smooth ramped free-stream field satisfying wall impermeability.
+
+Do not initialize an arbitrary discontinuity at the no-slip wall.
+
+Ramp the no-slip/free-stream forcing over a short startup interval if necessary to suppress an unphysical impulsive vorticity spike.
+
+The initial condition must be deterministic.
+
+============================================================
+AIRFOIL PARAMETERS
+============================================================
+
+Provide one good default airfoil.
+
+For example, use an offset generating circle producing roughly:
+
+    10–15% thickness
+    modest or zero camber
+
+Prefer a symmetric approximately 12%-thick airfoil for default runs.
+
+The exact mapping parameters should be documented.
+
+Expose GUI controls for:
+
+    thickness-like mapping parameter
+    camber-like mapping parameter
+
+if practical.
+
+Changing geometry may require solver restart.
+
+============================================================
+GUI
+============================================================
+
+Create a PySide6 desktop GUI.
+
+Use a dark theme.
+
+Main window layout:
+
+    left or central:
+        large flow visualization
+
+    right:
+        controls
+        simulation statistics
+
+    bottom:
+        Cp plot / diagnostics
+
+The GUI must remain responsive while the simulation runs.
+
+Run the solver in a worker thread or QThread.
+
+Never block the Qt event loop with the timestep loop.
+
+============================================================
+FLOW VISUALIZATION
+============================================================
+
+Provide selectable fields:
+
+    Vorticity
+    Velocity magnitude
+    u velocity
+    v velocity
+    Pressure
+    Cp-like pressure field
+    Streamfunction
+
+Default:
+
+    Vorticity
+
+The simulation grid is curvilinear in physical space.
+
+Render the mapped field in physical x-y coordinates.
+
+Do not display it as a rectangular s-theta image.
+
+Implement a fast renderer appropriate for a structured curvilinear grid.
+
+Reasonable options include:
+
+1.
+Precompute a physical-space rasterization lookup table mapping screen pixels back into computational coordinates.
+
+or
+
+2.
+Precompute triangular connectivity for the mapped structured grid and rasterize colored triangles efficiently.
+
+Prefer option 1 for fast repeated rendering.
+
+Precompute screen-to-grid interpolation weights when the geometry/view does not change.
+
+Then each frame should mostly perform:
+
+    field normalization
+    interpolation using precomputed indices/weights
+    uint8 colormap lookup
+    QImage update
+
+Do not reconstruct geometric interpolation from scratch every frame.
+
+============================================================
+COLORMAPS
+============================================================
+
+Implement lightweight NumPy-based colormaps.
+
+Use:
+
+    Inferno
+
+for scalar positive fields such as velocity magnitude.
+
+Use a diverging map for:
+
+    Vorticity
+    u
+    v
+    Pressure
+
+Center vorticity around zero.
+
+Use percentile or robust dynamic normalization so isolated extrema do not make the entire field black.
+
+Provide optional fixed color limits.
+
+============================================================
+FAST QIMAGE RENDERING
+============================================================
+
+For the final rasterized visualization:
+
+Convert the rendered field into a contiguous uint8 NumPy image.
+
+Wrap that memory directly in a QImage where possible.
+
+Avoid per-pixel Python loops.
+
+If using indexed-color QImage, use a 256-entry color table.
+
+Otherwise use contiguous RGB888/RGBA8888 arrays.
+
+The GUI must not flicker.
+
+============================================================
+AIRFOIL OVERLAY
+============================================================
+
+Draw the airfoil accurately on top of the flow field.
+
+Use the mapping surface coordinates.
+
+Draw:
+
+    airfoil fill
+    thin outline
+
+The body must appear stationary and geometrically smooth.
+
+============================================================
+STREAMLINES
+============================================================
+
+Provide an optional streamline overlay.
+
+Do NOT recompute hundreds of expensive streamline integrations every frame.
+
+Possible implementation:
+
+    update streamlines every N rendered frames
+
+Use bilinear interpolation of physical velocity on the precomputed raster grid.
+
+Seed streamlines primarily upstream of the airfoil.
+
+Keep the overlay lightweight.
+
+============================================================
+VORTICITY PARTICLE / DOT VIEW
+============================================================
+
+Optionally provide a visualization resembling the supplied reference image:
+
+    small tracer/dot markers advected with the physical velocity field
+
+This is a visualization feature only.
+
+Do not use particles for the Navier–Stokes solution.
+
+Keep the number of particles moderate and update them independently from the spectral state.
+
+============================================================
+CP PLOT
+============================================================
+
+Implement the Cp plot using Qt painting or another lightweight Qt-native approach.
+
+Do not depend on matplotlib for the live plot.
+
+Plot:
+
+    x/c
+
+horizontally.
+
+Plot:
+
+    Cp
+
+vertically.
+
+Show separately:
+
+    upper surface
+    lower surface
+
+Add:
+
+    Cp = 0 line
+
+and labels.
+
+Update Cp less frequently than the main flow image if pressure computation is expensive.
+
+============================================================
+CONTROLS
+============================================================
+
+At minimum provide:
+
+    Start
+    Pause
+    Reset
+
+Editable controls:
+
+    Re
+    alpha
+    U_inf
+    Ntheta
+    Nr
+    outer radius
+    CFL
+    field
+    frame every n steps
+
+Useful optional controls:
+
+    fixed / automatic dt
+    colormap range
+    streamline toggle
+    particle toggle
+    pressure update interval
+    geometry thickness
+    geometry camber
+    simulation speed
+
+Grid size changes should require Reset.
+
+============================================================
+DEFAULT SETTINGS
+============================================================
+
+Use sensible defaults such as:
+
+    Re = 1000
+    alpha = 5 degrees
+    U_inf = 1.0
+
+    Ntheta = 512
+    Nr = 160
+
+    outer radius = approximately 15 chord
+
+    CFL = 0.4
+
+    Field = Vorticity
+
+    Show frame every n steps = 2
+
+    Pressure update every 10 rendered frames
+
+For test/headless mode use much smaller grids.
+
+============================================================
+GUI STATISTICS
+============================================================
+
+Display without flickering:
+
+    simulation time
+    timestep count
+    dt
+    CFL
+    Re
+    alpha
+    max |omega|
+    max velocity
+    circulation Gamma
+    Cl from circulation
+    Cl from pressure if available
+    Cd if available
+    wall-slip error
+    kinetic-energy-like diagnostic
+
+Update text labels at a lower rate than the solver timestep.
+
+============================================================
+ARCHITECTURE
+============================================================
+
+Use a clean package structure similar to:
+
+    joukowskisim/
+        __init__.py
+        main.py
+        gui.py
+        solver.py
+        mapping.py
+        spectral.py
+        poisson.py
+        boundary.py
+        pressure.py
+        diagnostics.py
+        renderer.py
+        colormaps.py
+
+Keep mathematical operators separate from Qt code.
+
+GUI modules must not contain core CFD equations.
+
+============================================================
+PERFORMANCE
+============================================================
+
+The solver should be efficient on a multicore desktop CPU.
+
+Use:
+
+    NumPy vectorization
+    SciPy multithreaded FFT
+    preallocated arrays where practical
+    precomputed geometry
+    precomputed derivative operators
+    precomputed Fourier modes
+    cached LU factorizations
+    contiguous arrays
+
+Avoid:
+
+    Python loops over grid points
+    repeated matrix construction
+    repeated geometry construction
+    per-frame interpolation setup
+    per-frame creation of large temporary objects where avoidable
+
+Python loops over Fourier modes may be acceptable for radial linear solves, but optimize/batch when practical.
+
+Set SciPy FFT workers explicitly.
+
+============================================================
+NUMERICAL DIAGNOSTICS
+============================================================
+
+Continuously check for:
+
+    NaN
+    Inf
+    exploding max vorticity
+    negative/invalid dt
+    severe wall-slip error
+
+Fail gracefully.
+
+Do not silently continue a numerically corrupted simulation.
+
+============================================================
+TESTS
+============================================================
+
+Create a comprehensive pytest suite.
+
+At minimum include tests for:
+
+1. Joukowski geometry
+   - finite mapped coordinates
+   - chord normalization
+   - closed airfoil contour
+
+2. Metric
+   - finite
+   - positive away from allowed regularized trailing edge
+   - stable trailing-edge behavior
+
+3. Fourier derivative
+   For:
+       f(theta) = sin(k theta)
+   verify:
+       df/dtheta = k cos(k theta)
+
+4. Fourier second derivative
+
+5. Chebyshev derivative
+   Verify using low-order polynomials.
+
+6. Laplacian transformation
+   Test a smooth known function.
+
+7. Streamfunction Poisson solver
+   Use a manufactured solution.
+
+8. Uniform-flow velocity recovery
+   Verify physical u,v against known free stream away from the body.
+
+9. Incompressibility
+   Verify numerical divergence is small.
+
+10. Wall impermeability
+
+11. Wall no-slip
+   Verify tangential wall velocity is small after boundary update.
+
+12. Far-field velocity
+   Verify it approaches U_inf at alpha.
+
+13. Dealiasing
+   Verify modes above cutoff are removed.
+
+14. Deterministic initialization
+
+15. Finite values after multiple timesteps
+
+16. Positive finite timestep
+
+17. Viscous decay
+   With advection disabled or appropriate manufactured state.
+
+18. Pressure Poisson manufactured solution
+
+19. Cp finite values
+
+20. Headless short simulation
+   Run approximately 10–50 timesteps on a small grid.
+
+21. Physical wake sanity test
+   For an angle-of-attack case, verify nonzero downstream vorticity develops.
+
+22. Symmetry sanity test
+   For alpha = 0 and symmetric geometry at early times,
+   verify approximate upper/lower symmetry.
+
+23. Circulation sign
+   For positive alpha after startup,
+   verify circulation has the conventionally expected sign according to the implementation's documented convention.
+
+============================================================
+MANUFACTURED SOLUTIONS
+============================================================
+
+Where possible, use analytical manufactured fields in computational coordinates to verify:
+
+    theta derivatives
+    radial derivatives
+    mapped Laplacian
+    Poisson solver
+    velocity transformation
+
+Do not make tests depend only on visually plausible CFD behavior.
+
+============================================================
+HEADLESS MODE
+============================================================
+
+Provide:
+
+    uv run python -m joukowskisim.main --headless
+
+or equivalent.
+
+Support options such as:
+
+    --steps 100
+    --nr 64
+    --ntheta 128
+    --re 500
+    --alpha 5
+
+Headless mode should print final diagnostics and exit.
+
+============================================================
+OPTIONAL BENCHMARK MODE
+============================================================
+
+Provide:
+
+    uv run python -m joukowskisim.main --benchmark
+
+Measure:
+
+    steps / second
+    FFT time
+    streamfunction solve time
+    nonlinear-term time
+    pressure solve time
+
+Use a moderate grid.
+
+============================================================
+PHYSICS VALIDATION
+============================================================
+
+The solver does not need to reproduce a particular experimental dataset exactly.
+
+However, verify qualitatively that:
+
+At alpha = 0:
+    approximately symmetric flow for symmetric geometry.
+
+At small positive alpha:
+    upper/lower pressure asymmetry appears.
+    circulation becomes nonzero.
+    positive lift develops according to the chosen sign convention.
+
+At higher alpha and/or Re:
+    separated vorticity develops downstream.
+    wake becomes unsteady.
+
+Avoid claiming quantitative high-Re turbulence accuracy.
+
+This is a 2D laminar/unsteady spectral Navier–Stokes solver.
+
+============================================================
+IMPORTANT NUMERICAL PRIORITIES
+============================================================
+
+Prioritize correctness in this order:
+
+1. conformal mapping and metric correctness
+2. streamfunction Poisson equation
+3. velocity transformation
+4. no-slip wall vorticity treatment
+5. nonlinear advection
+6. time integration stability
+7. far-field condition
+8. pressure reconstruction
+9. GUI rendering
+10. performance optimization
+
+Do not spend time making the GUI elaborate while the CFD solution is physically wrong.
+
+============================================================
+IMPORTANT DESIGN CONSTRAINT
+============================================================
+
+Do NOT revert to:
+
+    Cartesian FFT
+    +
+    immersed boundary
+    +
+    Brinkman penalization
+
+The central purpose of this project is to investigate whether a body-fitted conformally mapped spectral Navier–Stokes formulation can provide superior resolution around an airfoil.
+
+The airfoil boundary must remain a coordinate surface.
+
+============================================================
+REFERENCE VISUAL APPEARANCE
+============================================================
+
+Use the supplied image only as inspiration for the physical-space visualization.
+
+The desired visual concept is:
+
+    curvilinear flow following an airfoil
+    dense spatial resolution near the airfoil
+    visible wake / vorticity structures
+    airfoil clearly overlaid
+    Cp curve shown below the flow
+
+Do not try to duplicate the exact image.
+
+The CFD field itself must come from the Navier–Stokes solution.
+
+============================================================
+IMPLEMENTATION PROCESS
+============================================================
+
+Work directly on the project files.
+
+First implement and validate:
+
+    mapping
+    computational grid
+    spectral derivatives
+    Poisson solver
+    velocity recovery
+
+Then implement:
+
+    wall boundary condition
+    vorticity RHS
+    time integrator
+
+Then:
+
+    diagnostics
+    pressure
+    Cp
+
+Then:
+
+    GUI
+    renderer
+
+After each major stage:
+
+    run tests
+    inspect failures
+    fix them
+
+At the end run:
+
+    uv sync
+    uv run pytest -q
+    uv run python -m joukowskisim.main --headless --steps 20
+
+Then perform a GUI smoke test if the environment permits.
+
+Do not stop after generating source files.
+
+Actually run the code and fix all failures that can be reproduced in the environment.
+
+============================================================
+FINAL RESPONSE
+============================================================
+
+At completion, report only a concise summary containing:
+
+1. What was implemented
+2. Mathematical formulation
+3. Mapping and spectral discretization
+4. Wall / far-field boundary treatment
+5. Time integration
+6. Pressure and Cp reconstruction
+7. GUI / rendering design
+8. Test results
+9. Benchmark result if available
+10. Exact commands to run:
+
+       uv run simulation
+
+       uv run pytest -q
+
+       uv run python -m joukowskisim.main --headless --steps 100
+
+Also explicitly mention any remaining numerical limitation, especially:
+- trailing-edge regularization,
+- wall-vorticity accuracy,
+- finite outer boundary,
+- and high-Re stability.
+
+
