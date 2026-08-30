@@ -4,3 +4,5 @@
 4 | seed GCROT with the linear RHS instead of a full preconditioner solve | 1.29967e-4 -> 1.31553e-4 (+1.2%) | kept
 5 | relax first-pass GCROT tolerance from 1e-8 to 1e-7 | 1.31553e-4 -> 1.44959e-4 (+10.2%) | kept
 6 | tune first-pass GCROT tolerance from 1e-7 to 3e-7 | 1.44959e-4 -> 1.50969e-4 (+4.1%) | kept
+7 | relax first-pass GCROT tolerance from 3e-7 to 1e-6 | 1.50969e-4 -> tests failed | reverted
+8 | use real FFTs for real-valued theta derivatives | 1.50969e-4 -> 1.66539e-4 (+10.3%) | kept

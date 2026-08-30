@@ -60,10 +60,18 @@ class SpectralGrid:
 
     def theta_derivative(self, f: np.ndarray, order: int = 1) -> np.ndarray:
         t0 = time.perf_counter()
-        fh = fft.fft(f, axis=-1, workers=-1)
-        out = fft.ifft(fh * (1j * self.k) ** order, axis=-1, workers=-1)
+        # Solver fields are real.  The one-sided transform preserves the same
+        # Fourier derivative while avoiding the redundant negative-frequency
+        # half of every exact-operator transform inside Krylov.
+        fh = fft.rfft(f, axis=-1, workers=-1)
+        out = fft.irfft(
+            fh * (1j * self.kr) ** order,
+            n=self.ntheta,
+            axis=-1,
+            workers=-1,
+        )
         self.fft_time += time.perf_counter() - t0
-        return np.ascontiguousarray(out.real)
+        return np.ascontiguousarray(out)
 
     def s_derivative(self, f: np.ndarray, order: int = 1) -> np.ndarray:
         D = self.Ds if order == 1 else self.Dss
