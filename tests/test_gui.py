@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from joukowskisim.gui import CpPlot, MainWindow, _CumulativeFrameRate
+from joukowskisim.gui import (
+    CpPlot,
+    MainWindow,
+    _CumulativeFrameRate,
+    _format_wall_time,
+)
 
 
 def test_cp_axis_fits_analytical_curve_but_rejects_viscous_spike():
@@ -24,6 +29,7 @@ def test_cumulative_frame_rate_includes_pauses_and_resets():
     now = [100.0]
     counter = _CumulativeFrameRate(lambda: now[0])
 
+    assert counter.snapshot() == (0, 0.0, 0)
     counter.start()
     now[0] = 101.0
     frames, elapsed, fps = counter.record_frame()
@@ -33,6 +39,8 @@ def test_cumulative_frame_rate_includes_pauses_and_resets():
 
     # Starting again after a pause must retain the original wall-time epoch.
     now[0] = 111.0
+    frames, elapsed, fps = counter.snapshot()
+    assert (frames, elapsed, fps) == (1, pytest.approx(11.0), 0)
     counter.start()
     now[0] = 112.0
     frames, elapsed, fps = counter.record_frame()
@@ -49,6 +57,20 @@ def test_cumulative_frame_rate_includes_pauses_and_resets():
     assert elapsed == pytest.approx(2.0)
     assert fps == 1
     assert isinstance(fps, int)
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (-1.0, "00:00:00"),
+        (0.9, "00:00:00"),
+        (65.2, "00:01:05"),
+        (3_661.9, "01:01:01"),
+        (90_061.0, "1d 01:01:01"),
+    ],
+)
+def test_wall_time_display(seconds, expected):
+    assert _format_wall_time(seconds) == expected
 
 
 def test_stale_worker_generation_cannot_replace_reset_frame():

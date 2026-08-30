@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from joukowskisim.mapping import AirfoilMapping
 
 
@@ -23,3 +24,7 @@ def test_analytic_mapping_derivative():
     numerical=(m._raw_map(zeta+eps)-m._raw_map(zeta-eps))/(2*eps)/m.raw_chord
     assert np.max(abs(numerical-m.dz_dzeta(zeta)))<1e-8
 
+
+def test_mapping_rejects_critical_point_in_fluid_domain():
+    with pytest.raises(ValueError, match="critical points"):
+        AirfoilMapping(camber=0.5)

@@ -27,6 +27,21 @@ class AirfoilMapping:
         self.center = complex(-offset, float(self.camber) * 0.35)
         right = self.center.real + self.circle_radius
         self.a = max(0.2, right - float(self.te_gap))
+        margin = 64.0 * np.finfo(float).eps * max(
+            1.0,
+            self.circle_radius,
+            abs(self.center),
+            abs(self.a),
+        )
+        critical_distances = (
+            abs(complex(self.a) - self.center),
+            abs(complex(-self.a) - self.center),
+        )
+        if max(critical_distances) >= self.circle_radius - margin:
+            raise ValueError(
+                "Joukowski critical points must lie strictly inside the "
+                "generating circle; reduce camber/thickness"
+            )
         th = np.linspace(0.0, 2 * np.pi, 16384, endpoint=False)
         raw = self._raw_map(self.center + self.circle_radius * np.exp(1j * th))
         self.x_min = float(raw.real.min())

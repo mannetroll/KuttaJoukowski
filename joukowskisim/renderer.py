@@ -27,15 +27,33 @@ class CurvilinearRenderer:
         jt = tt / (2*np.pi) * solver.config.ntheta
         it = np.floor(jt).astype(int) % solver.config.ntheta
         wt = jt - np.floor(jt)
-        self.valid = valid; self.ir = ir; self.it = it
-        self.wr = wr; self.wt = wt
+        jp = (it + 1) % solver.config.ntheta
+        stride = solver.config.ntheta
+        self.valid = valid
+        self._indices = (
+            np.ascontiguousarray(ir * stride + it, dtype=np.int32),
+            np.ascontiguousarray(ir * stride + jp, dtype=np.int32),
+            np.ascontiguousarray((ir + 1) * stride + it, dtype=np.int32),
+            np.ascontiguousarray((ir + 1) * stride + jp, dtype=np.int32),
+        )
+        self._weights = (
+            np.ascontiguousarray((1.0 - wr) * (1.0 - wt)),
+            np.ascontiguousarray((1.0 - wr) * wt),
+            np.ascontiguousarray(wr * (1.0 - wt)),
+            np.ascontiguousarray(wr * wt),
+        )
         self._surface_pixels = self._make_surface_pixels()
 
     def interpolate(self, field: np.ndarray) -> np.ndarray:
-        i, j = self.ir, self.it; jp = (j+1) % self.solver.config.ntheta
-        a = field[i,j]*(1-self.wt) + field[i,jp]*self.wt
-        b = field[i+1,j]*(1-self.wt) + field[i+1,jp]*self.wt
-        return a*(1-self.wr) + b*self.wr
+        values = np.asarray(field).reshape(-1)
+        i00, i01, i10, i11 = self._indices
+        w00, w01, w10, w11 = self._weights
+        return (
+            values[i00] * w00
+            + values[i01] * w01
+            + values[i10] * w10
+            + values[i11] * w11
+        )
 
     def render(self, field: np.ndarray, positive: bool = False) -> np.ndarray:
         return colorize(self.interpolate(field), positive=positive, valid=self.valid)

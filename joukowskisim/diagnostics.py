@@ -5,7 +5,11 @@ import numpy as np
 
 
 def circulation_from_streamfunction(psi_s: np.ndarray, radial_index: int = 2) -> float:
-    """Clockwise-positive circulation, so positive alpha normally gives +Cl."""
+    """Clockwise-positive circulation on one computational-s contour.
+
+    In viscous unsteady flow this is contour-dependent wherever vorticity lies
+    between contours; it is not automatically the inviscid Kutta circulation.
+    """
     return float(np.mean(psi_s[radial_index]) * 2 * np.pi)
 
 
@@ -24,4 +28,3 @@ def divergence(u: np.ndarray, v: np.ndarray, grid, mapping) -> np.ndarray:
     ux = (us * es.real + ut * et.real) / H
     vy = (vs * es.imag + vt * et.imag) / H
     return ux + vy
-

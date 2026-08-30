@@ -145,7 +145,7 @@ with default:
 
     U_inf = 1.0
     chord = 1.0
-    Re = 1000
+    Re = 10000
     alpha = 5 degrees
 
 and therefore:
@@ -320,8 +320,8 @@ Radial/log-radius direction:
 
 Recommended default:
 
-    Ntheta = 512
-    Nr = 160
+    Ntheta = 768
+    Nr = 240
 
 Support smaller test configurations such as:
 
@@ -451,6 +451,14 @@ Use:
 for LU factorization / solve if appropriate.
 
 Do not invert matrices explicitly.
+
+The SciPy reference must not apply hundreds of independent cached LU factors
+through one serial Python loop.  Use a small persistent worker pool with coarse
+contiguous mode/column chunks and direct LAPACK ``getrs`` application.  For a
+real modal matrix with a complex Fourier right-hand side, solve real and
+imaginary parts together as two right-hand sides of the real factor; do not
+convert the real LU matrix to complex for every mode.  Preserve deterministic
+results and test the parallel path against ``scipy.linalg.lu_solve``.
 
 The streamfunction solve should be one of the most optimized parts of the implementation.
 
@@ -624,18 +632,40 @@ method as third-order.  Measure and report the explicit and implicit orders.  A
 genuinely third-order full IMEX method requires a different, documented tableau
 and must not be substituted silently for the supplied recurrence.
 
-At minimum, treat the stiff mapped radial diffusion:
+Treat the complete mapped viscous operator implicitly:
 
-    L_r(omega) = nu/H^2 * omega_ss
+    L(omega) = nu/H^2 * (omega_ss + omega_thetatheta)
 
-implicitly.  Treating the full mapped viscous operator implicitly is also
-acceptable if its coupled solve is correct and efficient.  Incorporate wall
-and outer vorticity conditions consistently into every implicit stage solve.
+Because ``H^-2`` varies in theta, it does not commute with the Fourier
+transform.  Do NOT replace the azimuthal part by an independently diagonal
+``-k^2/H^2`` modal solve.  The SciPy reference must apply the exact
+variable-metric two-dimensional stage matrix with a matrix-free Krylov solve.
+Use the cached radial implicit solve plus its generalized-Thom Schur inverse as
+a preconditioner, not as an ADI replacement for the complete operator.  A
+naive radial/theta product introduces an ``O(dt^2) L_r L_theta`` split term and
+is not the reference stage equation.
+
+Solve stages as increments from the current compatible ``(omega, psi)`` pair.
+For increment ``delta``, use the full interior Helmholtz equation, homogeneous
+Poisson response, and the algebraic wall row
+
+    delta_wall - Thom(P(-H^2 delta))
+      = Thom(psi_reference) - omega_reference_wall
+
+with ``delta_outer = -omega_reference_outer``.  Recover the new
+streamfunction by adding the homogeneous Poisson response to the reference
+streamfunction.  This avoids catastrophic cancellation in the large affine
+Thom forcing.  Cache the two near-wall rows of each modal Poisson inverse for
+cheap wall-functional products.  Retain Krylov recycle vectors across stages
+or timesteps only when an end-to-end benchmark demonstrates a gain; stale
+subspaces can cost more to re-orthogonalize than they save.  Independently
+verify the full interior, wall, and outer residual after each stage.
+
 Precompute or cache stage operators/factorizations when the timestep policy
 allows it, and use batched/device-resident solves in MLX.
 
-The production timestep must no longer be pinned to approximately 3e-9 by the
-explicit Chebyshev wall spacing at the documented ``Nr=160`` default.  The
+The production timestep must not be pinned by the explicit Chebyshev wall
+spacing at the documented ``Nr=240`` default.  The
 adaptive constraint should be based primarily on mapped advective CFL and any
 remaining explicitly treated terms.  Keep a fully explicit float64 stepper
 only as a small-grid reference/testing option; it must not be the default GUI
@@ -1104,12 +1134,12 @@ DEFAULT SETTINGS
 
 Use sensible defaults such as:
 
-    Re = 1000
+    Re = 10000
     alpha = 5 degrees
     U_inf = 1.0
 
-    Ntheta = 512
-    Nr = 160
+    Ntheta = 768
+    Nr = 240
 
     outer radius = approximately 15 chord
 
@@ -1117,9 +1147,9 @@ Use sensible defaults such as:
 
     Field = Vorticity
 
-    Show frame every n steps = 2
+    Show frame every n steps = 1
 
-    Pressure update every 10 rendered frames
+    Pressure update every 20 simulation steps
 
     Backend = auto
 
@@ -1146,7 +1176,10 @@ Display without flickering:
     circulation Gamma
     Cl from circulation
     Cl from pressure if available
+    current local DateTime including timezone
+    wall time elapsed since Start as a clock duration
     cumulative FPS as a whole integer
+    simulation-time units per wall second
     Cd if available
     wall-slip error
     kinetic-energy-like diagnostic
@@ -1154,9 +1187,12 @@ Display without flickering:
 Compute cumulative FPS from total produced simulation frames divided by
 wall-clock time elapsed since the first Start after the last Reset.  Pause time
 remains in the denominator because the metric is explicitly wall time since
-start.  Use a monotonic clock, update it once per produced frame, and display
-the rate rounded to the nearest integer without decimal places.  Do not report
-timestep iterations per second as GUI FPS.
+start.  Display that same elapsed duration alongside the current local DateTime.
+Update both clock displays at least once per second even while paused; Reset
+returns elapsed wall time to zero.  Use a monotonic clock for elapsed time and
+the civil clock only for DateTime.  Display cumulative FPS rounded to the
+nearest integer without decimal places.  Do not report timestep iterations per
+second as GUI FPS.
 
 Update text labels at a lower rate than the solver timestep.
 
@@ -1338,10 +1374,16 @@ At minimum include tests for:
    convergence.  Do not assert third-order convergence for the complete split
    method unless a different order-consistent tableau is implemented and named.
 
-25. Implicit radial diffusion
+25. Implicit full mapped diffusion
    Verify unconditional decay of stiff radial modes over timesteps that exceed
-   the explicit Chebyshev diffusion limit, with wall and outer boundary values
-   enforced at every stage.
+   the explicit Chebyshev diffusion limit and stiff retained angular modes over
+   timesteps that exceed the former explicit-theta limit by at least two orders
+   of magnitude.  Compare a complete tiny-grid stage against a directly
+   assembled dense solve.  Verify the fast near-wall Poisson functional against
+   a full homogeneous Poisson response, and check the independently evaluated
+   interior, Thom-wall, and outer residuals.  Confirm that resolved-grid
+   timestep selection retains the counterfactual diffusion limits only as
+   diagnostics and is instead selected by advection and other explicit terms.
 
 26. Compatible initialization or physical-time startup ramp
    Always verify the discrete initialization compatibility residuals and the
@@ -1368,7 +1410,8 @@ At minimum include tests for:
 30. Backend gating and cumulative FPS
    Test that failed correctness or benchmark gates force ``auto`` to SciPy.
    Test cumulative FPS with an injected monotonic clock, including paused-time
-   inclusion, reset behavior, and integer display formatting.
+   inclusion, reset behavior, integer display formatting, and the displayed
+   elapsed wall-time duration.
 
 ============================================================
 MANUFACTURED SOLUTIONS
@@ -1415,10 +1458,12 @@ Provide:
 Measure:
 
     steps / second
+    simulation-time units / wall second
+    wall seconds / simulation-time unit
     FFT time
     streamfunction solve time
     nonlinear-term time
-    implicit LS_IMEX_RK3 solve time
+    full mapped implicit LS_IMEX_RK3 solve time
     pressure solve time
 
 Benchmark both the SciPy float64 reference and MLX, when available, using the
@@ -1428,6 +1473,11 @@ include all device transfers required by the real GUI/headless workflow.
 Separately timed FFT microbenchmarks may be diagnostic, but they must not be
 used to claim solver acceleration.  The gating decision must use complete
 timesteps and must include the normal diagnostic cadence.
+
+Do not use raw FPS or steps/second alone to compare timestep algorithms.  A
+more expensive fully implicit step is a win when its larger stable ``dt``
+reduces wall time to a fixed physical simulation time.  Always report both raw
+throughput and simulation-time throughput.
 
 Use a moderate grid.
 

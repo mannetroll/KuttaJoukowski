@@ -1,0 +1,47 @@
+• Yes—but only for larger grids or a fully MLX-resident solver. Your 187 FPS result is real because
+  turbo_simulator.py keeps its entire Fourier solver on Metal.
+
+  Measured on your M1 Max:
+
+   Grid        SciPy float64 FFT pair    MLX resident    MLX with round trip
+  ━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━
+   160×512                   0.235 ms        0.287 ms               0.297 ms
+  ──────────  ────────────────────────  ──────────────  ─────────────────────
+   240×768                   0.449 ms        0.283 ms               0.332 ms
+  ──────────  ────────────────────────  ──────────────  ─────────────────────
+   320×1024                  1.028 ms        0.300 ms               0.388 ms
+
+  So MLX wins substantially at 768–1024 angular points, but loses at the current 160×512 default.
+
+  The larger issue is that JoukowskiSim spends only about 9% of each step in FFT/DCT operations. It performs
+  roughly 3,081 small Poisson/radial/Thom LU solves per step, which dominate runtime. MLX 0.32.2 currently reports
+  that lu_factor and solve_triangular are unsupported on Metal, despite appearing in the general API.
+
+  Therefore an FFT-only patch would provide little whole-solver improvement and convert float64 state to float32;
+  MLX documents that GPU float64 is unsupported and NumPy float64 converts to MLX float32. MLX data types
+  (https://ml-explore.github.io/mlx/build/html/python/data_types.html), NumPy conversion
+  (https://ml-explore.github.io/mlx/build/html/usage/numpy.html)
+
+  The worthwhile route is:
+
+  - Keep the SciPy float64 solver as the reference.
+  - Add a persistent MLX backend for FFTs, derivatives, nonlinear products, state and RK stages.
+  - Implement a custom Metal batched LU-apply kernel for the cached Poisson/radial factors.
+  - Transfer to NumPy only for rendered/pressure frames.
+  - Validate Cp, circulation, wall slip and residuals against float64.
+
+  That can deliver a meaningful acceleration. An FFT-only switch cannot reproduce the turbo solver’s 187 FPS.
+
+─ Worked for 5m 37s ───────────────────────────────────────────────────────────────────────────────────────────────
+
+  A useful structural shortcut emerged from the Joukowski map itself: after multiplying by (|\zeta|^4), the
+  variable-metric theta Helmholtz equation has only five coupled Fourier diagonals. That gives an exact cached
+  cyclic-pentadiagonal solve—no finite-difference approximation—and should make the full coupled Krylov solve much
+  cheaper. I’m integrating that as the preconditioner now.
+
+
+----------------------------------------
+
+For your specific case, I think a Codex-driven OpenFOAM RSM laboratory is more compelling than writing another standalone CFD code: implement LRR/SSG first as known baselines, reproduce canonical cases, then insert your nonlinear closures and let the agent run systematic regression against DNS datasets. That is exactly the sort of formerly tedious research workflow that current coding agents can substantially accelerate.
+
+

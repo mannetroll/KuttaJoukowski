@@ -1,6 +1,7 @@
 """Responsive dark PySide6 desktop interface."""
 
 from __future__ import annotations
+from datetime import datetime
 import threading
 import time
 import numpy as np
@@ -29,18 +30,49 @@ class _CumulativeFrameRate:
     def record_frame(self):
         self.start()
         self.frames += 1
+        return self.snapshot()
+
+    def snapshot(self):
+        """Return current totals without counting another simulation frame."""
+        if self.started_at is None:
+            return self.frames, 0.0, 0
         elapsed = max(0.0, self._clock() - self.started_at)
         fps = int(self.frames / elapsed + 0.5) if elapsed > 0.0 else 0
         return self.frames, elapsed, fps
+
+
+def _format_wall_time(seconds: float) -> str:
+    """Format non-negative elapsed seconds as a compact days-plus-clock value."""
+    total_seconds = max(0, int(seconds))
+    days, remainder = divmod(total_seconds, 24 * 60 * 60)
+    hours, remainder = divmod(remainder, 60 * 60)
+    minutes, secs = divmod(remainder, 60)
+    clock = f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{days}d {clock}" if days else clock
+
+
+def _current_datetime_text(now: datetime | None = None) -> str:
+    """Return local wall-clock time with an explicit timezone abbreviation."""
+    current = datetime.now().astimezone() if now is None else now.astimezone()
+    return current.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 class SimulationThread(QtCore.QThread):
     frame_ready = QtCore.Signal(object, object, object)
     failed = QtCore.Signal(str)
 
-    def __init__(self, solver: FlowSolver, field: str, frame_skip: int, pressure_every: int = 10):
+    def __init__(
+        self,
+        solver: FlowSolver,
+        field: str,
+        frame_skip: int,
+        pressure_every_steps: int = 20,
+    ):
         super().__init__(); self.solver = solver; self.field_name = field
-        self.frame_skip = max(1, frame_skip); self.pressure_every = pressure_every
+        self.frame_skip = max(1, frame_skip)
+        self.pressure_every_steps = max(1, pressure_every_steps)
+        self._last_pressure_step = 0
+        self._simulation_time_origin = solver.time
         self.running = False; self.shutdown = False; self._lock = threading.Lock()
         self.frame_rate = _CumulativeFrameRate()
 
@@ -49,9 +81,14 @@ class SimulationThread(QtCore.QThread):
             while not self.shutdown:
                 if not self.running:
                     self.msleep(20); continue
-                for _ in range(self.frame_skip): self.solver.step()
-                frame_no = self.solver.step_count // self.frame_skip
-                if frame_no % self.pressure_every == 0: self.solver.compute_pressure()
+                for _ in range(self.frame_skip):
+                    self.solver.step(return_diagnostics=False)
+                if (
+                    self.solver.step_count - self._last_pressure_step
+                    >= self.pressure_every_steps
+                ):
+                    self.solver.compute_pressure()
+                    self._last_pressure_step = self.solver.step_count
                 with self._lock: field_name = self.field_name
                 field = self.solver.field(field_name).copy()
                 coeff = None
@@ -59,7 +96,15 @@ class SimulationThread(QtCore.QThread):
                     coeff = surface_coefficients(self.solver, self.solver.pressure)
                 stats = self.solver.diagnostics()
                 frames, elapsed, fps = self.frame_rate.record_frame()
-                stats.update({"simulation_frames": frames, "fps_elapsed": elapsed, "fps": fps})
+                stats.update({
+                    "simulation_frames": frames,
+                    "fps_elapsed": elapsed,
+                    "fps": fps,
+                    "simulation_time_per_wall_second": (
+                        (self.solver.time - self._simulation_time_origin)
+                        / max(elapsed, 1e-15)
+                    ),
+                })
                 self.frame_ready.emit(field, stats, coeff)
         except Exception as exc:
             self.running = False; self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -239,15 +284,22 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__(); self.setWindowTitle("JoukowskiSim — Conformal Navier–Stokes"); self.resize(1280,850)
         self._worker_generation = 0
         self._retired_workers = []
+        self._last_stats = None
         self._build_controls(); self.reset_solver()
+        self._status_clock = QtCore.QTimer(self)
+        self._status_clock.setInterval(1000)
+        self._status_clock.timeout.connect(self._refresh_status_clock)
+        self._status_clock.start()
 
     def _build_controls(self):
         root=QtWidgets.QWidget(); self.setCentralWidget(root); outer=QtWidgets.QHBoxLayout(root)
         self.visual_col=QtWidgets.QVBoxLayout(); outer.addLayout(self.visual_col,1)
         panel=QtWidgets.QWidget(); panel.setMaximumWidth(285); form=QtWidgets.QFormLayout(panel); outer.addWidget(panel)
         self.edits={}
-        for key,label,value in [("re","Re",1000),("alpha","alpha (deg)",5),("u_inf","U infinity",1),("nr","Nr",160),("ntheta","Ntheta",512),("outer_radius","outer radius",15),("cfl","CFL",.4),("thickness","thickness",.12),("camber","camber",0),("frame_skip","frame every",2)]:
-            e=QtWidgets.QLineEdit(str(value)); self.edits[key]=e; form.addRow(label,e)
+        defaults = SolverConfig()
+        for key,label,value in [("re","Re",defaults.re),("alpha","alpha (deg)",defaults.alpha),("u_inf","U infinity",defaults.u_inf),("nr","Nr",defaults.nr),("ntheta","Ntheta",defaults.ntheta),("outer_radius","outer radius",defaults.outer_radius),("cfl","CFL",defaults.cfl),("thickness","thickness",defaults.thickness),("camber","camber",defaults.camber),("frame_skip","frame every",1)]:
+            text = f"{value:g}" if isinstance(value, float) else str(value)
+            e=QtWidgets.QLineEdit(text); self.edits[key]=e; form.addRow(label,e)
         self.field=QtWidgets.QComboBox(); self.field.addItems(self.fields); form.addRow("Field",self.field)
         row=QtWidgets.QHBoxLayout(); self.start=QtWidgets.QPushButton("Start"); self.pause=QtWidgets.QPushButton("Pause"); self.reset=QtWidgets.QPushButton("Reset")
         for b in (self.start,self.pause,self.reset): row.addWidget(b)
@@ -310,8 +362,32 @@ class MainWindow(QtWidgets.QMainWindow):
         positive=self.field.currentText()=="Velocity magnitude"; self.view.set_rgb(self.renderer.render(field,positive))
         if coeff is not None:
             self.cpplot.set_data(self.solver, coeff['cp'], coeff['cp_kj'])
+        self._last_stats = dict(stats)
+        self._update_stats_text(self._last_stats)
+
+    def _refresh_status_clock(self):
+        """Refresh wall-clock diagnostics even while simulation is paused."""
+        if self._last_stats is None:
+            return
+        stats = dict(self._last_stats)
+        if hasattr(self, "worker"):
+            _, elapsed, fps = self.worker.frame_rate.snapshot()
+            stats["fps_elapsed"] = elapsed
+            stats["fps"] = fps
+            stats["simulation_time_per_wall_second"] = (
+                (self.solver.time - self.worker._simulation_time_origin)
+                / max(elapsed, 1e-15)
+                if elapsed > 0.0
+                else 0.0
+            )
+        self._update_stats_text(stats)
+
+    def _update_stats_text(self, stats):
         fps = int(stats.get('fps', 0))
-        lines=[f"t = {stats['time']:.5f}   step {int(stats['step'])}",f"dt = {stats['dt']:.3e}   CFL = {stats['cfl']:.3f}",f"FPS = {fps}",f"max |omega| = {stats['max_omega']:.3e}",f"max |u| = {stats['max_velocity']:.3f}",f"Gamma = {stats['gamma']:.4f}",f"Cl(KJ) = {stats['cl_kj']:.4f}",f"wall slip = {stats['wall_slip']:.3e}",f"energy-like = {stats['kinetic_energy']:.3e}"]
+        simulation_rate = float(stats.get('simulation_time_per_wall_second', 0.0))
+        wall_elapsed = float(stats.get('fps_elapsed', 0.0))
+        contour_s = float(stats.get('gamma_contour_s', 0.0))
+        lines=[f"DateTime = {_current_datetime_text()}",f"wall time = {_format_wall_time(wall_elapsed)}",f"t = {stats['time']:.5f}   step {int(stats['step'])}",f"dt = {stats['dt']:.3e}   CFL = {stats['cfl']:.3f}",f"FPS = {fps}   sim t/s = {simulation_rate:.3e}",f"max |omega| = {stats['max_omega']:.3e}",f"max |u| = {stats['max_velocity']:.3f}",f"Gamma(s={contour_s:.3g}) = {stats['gamma']:.4f}",f"Cl(Gamma) = {stats['cl_circulation']:.4f}",f"wall slip = {stats['wall_slip']:.3e}",f"energy-like = {stats['kinetic_energy']:.3e}"]
         if 'cl_pressure' in stats: lines.append(f"Cl(p) = {stats['cl_pressure']:.4f}\nCd(p) = {stats['cd_pressure']:.4f}")
         self.stats.setText("\n".join(lines))
     def closeEvent(self,event):

@@ -1,4 +1,4 @@
-"""Low-storage IMEX-RK3 support for stiff mapped radial diffusion."""
+"""Low-storage IMEX-RK3 support for stiff mapped diffusion."""
 
 from __future__ import annotations
 
@@ -6,11 +6,36 @@ import time
 import numpy as np
 from scipy import fft, linalg
 
+from .batched_lu import solve_cached_columns
+
 
 # Spalart/Moser/Rogers low-storage coefficients, matching the reference
 # implementation in turbo_simulator.py.
 LS_IMEX_ALPHA = (8.0 / 15.0, 5.0 / 12.0, 3.0 / 4.0)
 LS_IMEX_BETA = (0.0, -17.0 / 60.0, -5.0 / 12.0)
+
+
+class MappedImplicitDiffusion:
+    """Complete mapped viscous operator treated by the implicit stages.
+
+    Multiplication by ``H^-2`` does not commute with a Fourier transform, so
+    azimuthal diffusion is not diagonal in Fourier space.  The production
+    stage solve therefore uses this exact operator in a Krylov method, with
+    :class:`RadialImplicitDiffusion` as its cached preconditioner.
+    """
+
+    def __init__(self, grid, h2: np.ndarray, nu: float):
+        self.grid = grid
+        self.h2 = np.asarray(h2, dtype=float)
+        self.nu = float(nu)
+
+    def apply(self, field: np.ndarray) -> np.ndarray:
+        out = self.nu * (
+            self.grid.Dss @ field
+            + self.grid.theta_derivative(field, 2)
+        ) / self.h2
+        out[[0, -1], :] = 0.0
+        return np.ascontiguousarray(out)
 
 
 class RadialImplicitDiffusion:
@@ -124,13 +149,10 @@ class RadialImplicitDiffusion:
             rhs[1:-1]
             + alpha_dt * self._coefficient * boundary_second_derivative
         )
-        interior = np.empty_like(interior_rhs)
-        for column, factor in enumerate(self._factors[stage]):
-            interior[:, column] = linalg.lu_solve(
-                factor,
-                interior_rhs[:, column],
-                check_finite=False,
-            )
+        interior = solve_cached_columns(
+            self._factors[stage],
+            interior_rhs,
+        )
         out = np.empty_like(rhs)
         out[0] = wall
         out[1:-1] = interior

@@ -5,15 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 import time
 import numpy as np
+from scipy.sparse.linalg import LinearOperator, gcrotmk
 
 from .mapping import AirfoilMapping
 from .spectral import SpectralGrid
 from .poisson import PoissonSolver
-from .boundary import update_wall_vorticity, wall_velocity_error
+from .boundary import (
+    update_wall_vorticity,
+    wall_vorticity_from_streamfunction,
+)
 from .diagnostics import circulation_from_streamfunction, kinetic_energy
 from .imex import (
     LS_IMEX_ALPHA,
     LS_IMEX_BETA,
+    MappedImplicitDiffusion,
     RadialImplicitDiffusion,
     ThomWallInfluence,
 )
@@ -21,11 +26,11 @@ from .imex import (
 
 @dataclass
 class SolverConfig:
-    re: float = 1000.0
+    re: float = 10000.0
     alpha: float = 5.0
     u_inf: float = 1.0
-    nr: int = 160
-    ntheta: int = 512
+    nr: int = 240
+    ntheta: int = 768
     cfl: float = 0.4
     outer_radius: float = 15.0
     thickness: float = 0.12
@@ -63,6 +68,10 @@ class FlowSolver:
         self.last_dt_adv = 0.0; self.last_dt_theta = 0.0
         self.last_dt_diff_explicit = 0.0; self.last_implicit_residual = 0.0
         self.last_wall_iterations = 0
+        self.last_implicit_operator_applications = 0
+        self._velocity_cache: tuple[
+            np.ndarray, np.ndarray, np.ndarray, np.ndarray
+        ] | None = None
         self.coarse_timestep_fallback = self.config.nr < 40
         self.timing = {
             "poisson": 0.0,
@@ -77,6 +86,11 @@ class FlowSolver:
         q = np.clip((self.S / self.mapping.s_max - 0.85) / 0.15, 0.0, 1.0)
         self.sponge_strength = 0.25 * q * q
         self.radial_implicit = RadialImplicitDiffusion(
+            self.grid,
+            self.H2,
+            self.config.nu,
+        )
+        self.implicit_diffusion = MappedImplicitDiffusion(
             self.grid,
             self.H2,
             self.config.nu,
@@ -140,7 +154,11 @@ class FlowSolver:
                 f"(streamfunction residual {compatibility_error:.3e})"
             )
         self.omega = np.ascontiguousarray(omega)
-        self.psi = np.ascontiguousarray(psi)
+        # Keep the algebraically constructed compatible target.  Re-solving
+        # Poisson changes it by only roundoff, but the tightly clustered cubic
+        # Thom weights amplify that roundoff into a visible wall mismatch.
+        self.psi = np.ascontiguousarray(psi_target)
+        self._velocity_cache = None
         self.initial_compatibility_error = compatibility_error
 
     def solve_streamfunction(self, omega: np.ndarray) -> np.ndarray:
@@ -165,13 +183,27 @@ class FlowSolver:
         return out
 
     def velocity(self, psi: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if psi is None and self._velocity_cache is not None:
+            return self._velocity_cache
         p = self.psi if psi is None else psi
         ps = self.grid.s_derivative(p)
         pt = self.grid.theta_derivative(p)
         qs = pt / self.H
         qt = -ps / self.H
-        u, v = self.mapping.velocity_computational_to_physical(qs, qt, self.S, self.T)
-        return np.ascontiguousarray(u), np.ascontiguousarray(v), qs, qt
+        # The conformal coordinate basis is geometry-only and was already
+        # precomputed during initialization.  Reconstructing it here created
+        # complex mapping arrays on every CFL/diagnostic evaluation.
+        physical_velocity = qs * self.es + qt * self.et
+        u, v = physical_velocity.real, physical_velocity.imag
+        result = (
+            np.ascontiguousarray(u),
+            np.ascontiguousarray(v),
+            np.ascontiguousarray(qs),
+            np.ascontiguousarray(qt),
+        )
+        if psi is None:
+            self._velocity_cache = result
+        return result
 
     def nonlinear_term(self, omega: np.ndarray, psi: np.ndarray) -> np.ndarray:
         t0 = time.perf_counter()
@@ -186,20 +218,15 @@ class FlowSolver:
         t0 = time.perf_counter()
         psi = self.solve_streamfunction(omega)
         out = self._explicit_rhs(omega, psi)
-        out += self.radial_implicit.apply(omega)
+        out += self.implicit_diffusion.apply(omega)
         out[[0, -1], :] = 0.0
         self.timing["rhs"] += time.perf_counter() - t0
         return out, psi
 
     def _explicit_rhs(self, omega: np.ndarray, psi: np.ndarray) -> np.ndarray:
-        """Terms advanced explicitly by LS-IMEX-RK3."""
+        """Advection, sponge damping, and other nonstiff explicit terms."""
         adv = self.nonlinear_term(omega, psi)
-        theta_diffusion = (
-            self.config.nu
-            * self.grid.theta_derivative(omega, 2)
-            / self.H2
-        )
-        out = -adv + theta_diffusion - self.sponge_strength * omega
+        out = -adv - self.sponge_strength * omega
         out[[0, -1], :] = 0.0
         return np.ascontiguousarray(out)
 
@@ -229,7 +256,16 @@ class FlowSolver:
 
     def stable_timestep(self) -> float:
         dt_adv, dt_theta, dt_diff_explicit = self.timestep_limits()
-        candidate = min(dt_adv, dt_theta, 0.02)
+        # These are the limits that select the upcoming step and therefore
+        # the appropriate values for its reported CFL.  Recomputing them
+        # after every completed step duplicated a full velocity recovery.
+        self.last_dt_adv = dt_adv
+        self.last_dt_theta = dt_theta
+        self.last_dt_diff_explicit = dt_diff_explicit
+        # Both coordinate directions of viscosity are implicit.  Keep the old
+        # explicit limits as diagnostics, but do not let either select a
+        # resolved-grid production step.
+        candidate = min(dt_adv, 0.02)
         if self.coarse_timestep_fallback:
             # Small grids are useful for smoke tests but do not resolve
             # the initial wall layer or the cubic Thom reconstruction.  Keep
@@ -244,10 +280,13 @@ class FlowSolver:
             # leave 10% headroom whenever a smaller advective dt is required.
             if self.last_dt <= candidate < 1.25 * self.last_dt:
                 dt = self.last_dt
-            elif candidate < self.last_dt and dt_adv <= dt_theta:
+            elif candidate < self.last_dt:
                 dt = 0.9 * candidate
             elif candidate >= 1.25 * self.last_dt:
-                dt = 0.9 * candidate if dt_adv <= dt_theta else candidate
+                # The candidate itself already satisfies the requested CFL.
+                # Once a factor rebuild is justified, take the whole safe gain
+                # rather than paying that cost for only 90% of it.
+                dt = candidate
         if not np.isfinite(dt) or dt <= 0:
             raise FloatingPointError("invalid adaptive timestep")
         return float(dt)
@@ -255,95 +294,251 @@ class FlowSolver:
     def _apply_boundary(self, omega: np.ndarray, psi: np.ndarray) -> None:
         update_wall_vorticity(omega, psi, self.grid.Dss, self.H2, self.grid.s)
 
-    def _implicit_stage(
+    def _wall_response_from_vorticity(self, omega: np.ndarray) -> np.ndarray:
+        """Apply the homogeneous Poisson-plus-Thom wall functional."""
+        near_wall = self.poisson.solve_homogeneous_near_wall(
+            -self.H2 * omega
+        )
+        weights = self.wall_influence._wall_weights
+        curvature = weights[0] * near_wall[0] + weights[1] * near_wall[1]
+        return np.ascontiguousarray(-curvature / self.H2[0])
+
+    def _radial_closed_solve(
         self,
         rhs: np.ndarray,
         stage: int,
-    ) -> tuple[np.ndarray, np.ndarray, float, int]:
-        """Solve one radial stage and its dense Thom wall Schur system."""
+    ) -> np.ndarray:
+        """Apply the cached radial/Thom inverse used as a preconditioner.
+
+        Unlike the old stage routine, ``rhs[0]`` is an arbitrary right-hand
+        side for the *linear* wall equation.  This makes the action suitable
+        as a Krylov preconditioner for the coupled two-dimensional operator.
+        """
         zero_wall = np.zeros(self.config.ntheta, dtype=float)
         omega_base = self.radial_implicit.solve(
             rhs,
             stage,
             zero_wall,
+            outer=rhs[-1],
         )
-        psi_base = self.solve_streamfunction(omega_base)
-        closed_base = omega_base.copy()
-        self._apply_boundary(closed_base, psi_base)
-        closure_rhs = closed_base[0]
+        closure_rhs = rhs[0] + self._wall_response_from_vorticity(omega_base)
         wall = self.wall_influence.solve(stage, closure_rhs)
 
         omega = omega_base
         omega[0] = wall
-        omega_response = np.zeros_like(omega)
-        omega_response[1:-1] = (
+        omega[1:-1] += (
             self.radial_implicit.wall_response(stage) * wall[None, :]
         )
-        omega[1:-1] += omega_response[1:-1]
-        # Preserve the Schur decomposition numerically.  Re-solving the full
-        # nonhomogeneous problem loses ~1e-11 in psi; the tightly clustered
-        # wall reconstruction can amplify that into a visible closure error.
-        psi = psi_base + self._solve_streamfunction_response(omega_response)
-        closed = omega.copy()
-        self._apply_boundary(closed, psi)
-        wall_error = float(np.max(np.abs(closed[0] - wall))) / max(
-            1.0,
-            float(np.max(np.abs(wall))),
-        )
-        schur_error = self.wall_influence.residual(
-            stage,
-            wall,
-            closure_rhs,
-        )
-        residual = max(
-            self.radial_implicit.residual(omega, rhs, stage),
-            wall_error,
-            schur_error,
-        )
-        return np.ascontiguousarray(omega), np.ascontiguousarray(psi), residual, 1
+        return np.ascontiguousarray(omega)
 
-    def step(self, dt: float | None = None) -> dict[str, float]:
-        dt = self.stable_timestep() if dt is None else float(dt)
+    def _implicit_operator_apply(
+        self,
+        omega: np.ndarray,
+        alpha_dt: float,
+    ) -> np.ndarray:
+        """Apply the exact coupled stage matrix, including wall equations."""
+        out = omega - alpha_dt * self.implicit_diffusion.apply(omega)
+        out[0] = omega[0] - self._wall_response_from_vorticity(omega)
+        out[-1] = omega[-1]
+        return np.ascontiguousarray(out)
+
+    def _implicit_stage(
+        self,
+        rhs: np.ndarray,
+        stage: int,
+        reference_omega: np.ndarray,
+        reference_psi: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, float, int, int]:
+        """Solve one full mapped-diffusion stage with preconditioned GCROT.
+
+        The Krylov unknown is the increment from the current compatible state.
+        Its wall equation is homogeneous, avoiding cancellation between a
+        million-scale affine Thom forcing and homogeneous Poisson response.
+        """
+        alpha_dt = LS_IMEX_ALPHA[stage] * float(self.radial_implicit._dt or 0.0)
+        shape = rhs.shape
+        size = rhs.size
+        linear_rhs = rhs - (
+            reference_omega
+            - alpha_dt * self.implicit_diffusion.apply(reference_omega)
+        )
+        linear_rhs[0] = (
+            wall_vorticity_from_streamfunction(
+                reference_psi,
+                self.H2,
+                self.grid.s,
+            )
+            - reference_omega[0]
+        )
+        linear_rhs[-1] = -reference_omega[-1]
+        flat_rhs = linear_rhs.ravel()
+
+        operator_applications = 0
+
+        def apply_operator(values: np.ndarray) -> np.ndarray:
+            nonlocal operator_applications
+            operator_applications += 1
+            return self._implicit_operator_apply(
+                values.reshape(shape),
+                alpha_dt,
+            ).ravel()
+
+        operator = LinearOperator(
+            (size, size),
+            matvec=apply_operator,
+            dtype=float,
+        )
+        preconditioner = LinearOperator(
+            (size, size),
+            matvec=lambda values: self._radial_closed_solve(
+                values.reshape(shape),
+                stage,
+            ).ravel(),
+            dtype=float,
+        )
+        initial = self._radial_closed_solve(linear_rhs, stage).ravel()
+        solution, info = gcrotmk(
+            operator,
+            flat_rhs,
+            x0=initial,
+            M=preconditioner,
+            m=10,
+            k=5,
+            maxiter=30,
+            rtol=1e-8,
+            atol=0.0,
+        )
+        if info != 0:
+            raise FloatingPointError(
+                "full implicit diffusion solve did not converge "
+                f"at stage {stage} (GCROT info={info}, "
+                f"operator applications={operator_applications})"
+            )
+
+        def recover_and_measure(values: np.ndarray):
+            correction = np.ascontiguousarray(values.reshape(shape))
+            omega = np.ascontiguousarray(reference_omega + correction)
+            psi = np.ascontiguousarray(
+                reference_psi + self._solve_streamfunction_response(correction)
+            )
+            interior_defect = (
+                omega
+                - alpha_dt * self.implicit_diffusion.apply(omega)
+                - rhs
+            )
+            wall_target = wall_vorticity_from_streamfunction(
+                psi,
+                self.H2,
+                self.grid.s,
+            )
+            numerator = max(
+                float(np.max(np.abs(interior_defect[1:-1]))),
+                float(np.max(np.abs(omega[0] - wall_target))),
+                float(np.max(np.abs(omega[-1]))),
+            )
+            denominator = max(1.0, float(np.max(np.abs(rhs[1:-1]))))
+            return omega, psi, numerator / denominator
+
+        omega, psi, residual = recover_and_measure(solution)
+        if not np.isfinite(residual) or residual > 1e-5:
+            # GCROT's normwise convergence test can be looser than the
+            # independently checked max residual on very stiff low-Re cases.
+            # Refine only those stages, starting from the already good result;
+            # normal Re=1000/10000 production steps avoid this extra work.
+            solution, info = gcrotmk(
+                operator,
+                flat_rhs,
+                x0=solution,
+                M=preconditioner,
+                m=10,
+                k=5,
+                maxiter=30,
+                rtol=1e-10,
+                atol=0.0,
+            )
+            if info != 0:
+                raise FloatingPointError(
+                    "full implicit diffusion refinement did not converge "
+                    f"at stage {stage} (GCROT info={info}, "
+                    f"operator applications={operator_applications})"
+                )
+            omega, psi, residual = recover_and_measure(solution)
+        if not np.isfinite(residual) or residual > 1e-5:
+            raise FloatingPointError(
+                "full implicit diffusion residual exceeded tolerance "
+                f"at stage {stage} ({residual:.3e})"
+            )
+        return omega, np.ascontiguousarray(psi), residual, 1, operator_applications
+
+    def step(
+        self,
+        dt: float | None = None,
+        *,
+        return_diagnostics: bool = True,
+    ) -> dict[str, float]:
+        if dt is None:
+            dt = self.stable_timestep()
+            limits = (
+                self.last_dt_adv,
+                self.last_dt_theta,
+                self.last_dt_diff_explicit,
+            )
+        else:
+            dt = float(dt)
+            limits = self.timestep_limits()
         if not np.isfinite(dt) or dt <= 0:
             raise ValueError("dt must be finite and positive")
-        implicit_started = time.perf_counter()
+        implicit_elapsed = 0.0
+        prepare_started = time.perf_counter()
         self.radial_implicit.prepare(dt)
         self.wall_influence.prepare(dt)
+        implicit_elapsed += time.perf_counter() - prepare_started
         omega = self.omega.copy()
         psi = self.psi.copy()
         previous_explicit = np.zeros_like(omega)
         maximum_residual = 0.0
         maximum_wall_iterations = 0
+        maximum_operator_applications = 0
         for stage, (alpha, beta) in enumerate(zip(LS_IMEX_ALPHA, LS_IMEX_BETA)):
             explicit = self._explicit_rhs(omega, psi)
+            implicit_started = time.perf_counter()
             stage_rhs = (
                 omega
-                + beta * dt * self.radial_implicit.apply(omega)
+                + beta * dt * self.implicit_diffusion.apply(omega)
                 + alpha * dt * explicit
                 + beta * dt * previous_explicit
             )
-            omega, psi, residual, wall_iterations = self._implicit_stage(
+            omega, psi, residual, wall_iterations, operator_applications = self._implicit_stage(
                 stage_rhs,
                 stage,
+                omega,
+                psi,
             )
+            implicit_elapsed += time.perf_counter() - implicit_started
             previous_explicit = explicit
             maximum_residual = max(maximum_residual, residual)
             maximum_wall_iterations = max(maximum_wall_iterations, wall_iterations)
+            maximum_operator_applications = max(
+                maximum_operator_applications,
+                operator_applications,
+            )
         omega[-1] = 0.0
         if not np.all(np.isfinite(omega)) or np.max(np.abs(omega)) > 1e10:
             raise FloatingPointError("vorticity solution became unstable")
         self.omega = np.ascontiguousarray(omega)
         self.psi = np.ascontiguousarray(psi)
+        self._velocity_cache = None
         self.time += dt; self.step_count += 1; self.last_dt = dt
         self.last_implicit_residual = maximum_residual
         self.last_wall_iterations = maximum_wall_iterations
-        self.timing["implicit"] += time.perf_counter() - implicit_started
-        dt_adv, dt_theta, dt_diff_explicit = self.timestep_limits()
+        self.last_implicit_operator_applications = maximum_operator_applications
+        self.timing["implicit"] += implicit_elapsed
+        dt_adv, dt_theta, dt_diff_explicit = limits
         self.last_dt_adv = dt_adv
         self.last_dt_theta = dt_theta
         self.last_dt_diff_explicit = dt_diff_explicit
         self.last_cfl = dt / max(dt_adv, 1e-30) * self.config.cfl
-        return self.diagnostics()
+        return self.diagnostics() if return_diagnostics else {}
 
     def compute_pressure(self) -> np.ndarray:
         from .pressure import recover_pressure
@@ -353,14 +548,18 @@ class FlowSolver:
 
     def diagnostics(self) -> dict[str, float]:
         u, v, qs, qt = self.velocity()
-        ps = self.grid.s_derivative(self.psi)
-        gamma = circulation_from_streamfunction(ps, min(3, self.config.nr - 2))
+        # velocity() already formed qt = -psi_s/H; reuse it instead of a
+        # second dense Chebyshev derivative solely for circulation.
+        ps = -qt * self.H
+        circulation_index = min(3, self.config.nr - 2)
+        gamma = circulation_from_streamfunction(ps, circulation_index)
         data = {
             "time": self.time, "step": float(self.step_count), "dt": self.last_dt,
             "cfl": self.last_cfl, "max_omega": float(np.max(np.abs(self.omega))),
             "max_velocity": float(np.max(np.hypot(u, v))), "gamma": gamma,
-            "cl_kj": 2 * gamma / self.config.u_inf,
-            "wall_slip": wall_velocity_error(self.psi, self.grid.Ds, self.H),
+            "gamma_contour_s": float(self.grid.s[circulation_index]),
+            "cl_circulation": 2 * gamma / self.config.u_inf,
+            "wall_slip": float(np.max(np.abs(qt[0]))),
             "kinetic_energy": kinetic_energy(qs, qt, self.H2, self.grid.s),
             "initial_compatibility_error": self.initial_compatibility_error,
             "dt_adv": self.last_dt_adv,
@@ -368,6 +567,9 @@ class FlowSolver:
             "dt_diff_explicit": self.last_dt_diff_explicit,
             "implicit_residual": self.last_implicit_residual,
             "wall_iterations": float(self.last_wall_iterations),
+            "implicit_operator_applications": float(
+                self.last_implicit_operator_applications
+            ),
             "coarse_timestep_fallback": float(self.coarse_timestep_fallback),
         }
         if self.pressure is not None:
