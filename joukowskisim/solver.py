@@ -396,7 +396,12 @@ class FlowSolver:
             ).ravel(),
             dtype=float,
         )
-        initial = self._radial_closed_solve(linear_rhs, stage).ravel()
+        # Applying the full radial/Thom preconditioner only to seed ``x0``
+        # costs one grouped-LU/Poisson solve per stage.  The unpreconditioned
+        # linear RHS is already a close increment for these small IMEX stage
+        # corrections; GCROT still applies the same preconditioner to its
+        # Krylov vectors and the full residual is checked independently.
+        initial = linear_rhs.ravel().copy()
         solution, info = gcrotmk(
             operator,
             flat_rhs,
