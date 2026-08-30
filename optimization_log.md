@@ -7,3 +7,4 @@
 7 | relax first-pass GCROT tolerance from 3e-7 to 1e-6 | 1.50969e-4 -> tests failed | reverted
 8 | use real FFTs for real-valued theta derivatives | 1.50969e-4 -> 1.66539e-4 (+10.3%) | kept
 9 | group nearby radial preconditioner profiles within 10 percent | 1.66539e-4 -> 2.12981e-4 (+27.9%) | kept
+10 | assemble Thom response from cached exact near-wall inverse rows | 2.12981e-4 -> 2.58616e-4 (+21.4%) | kept

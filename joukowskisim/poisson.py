@@ -74,6 +74,40 @@ class PoissonSolver:
             )
         )
 
+    def solve_modes_homogeneous_near_wall(
+        self,
+        rhs: np.ndarray,
+    ) -> np.ndarray:
+        """Return rows 1 and 2 for every mode and a batch of RHS columns.
+
+        ``rhs`` has radial rows on its leading axis and independent source
+        columns on its trailing axis.  Unlike
+        :meth:`solve_homogeneous_near_wall`, this method deliberately does
+        not Fourier transform those columns: callers such as the Thom Schur
+        assembly are already constructing the response of each Fourier mode
+        to each physical-theta basis column explicitly.
+
+        The returned shape is ``(rfft_modes, 2, rhs_columns)``.  Homogeneous
+        radial boundary data are imposed by ignoring the first and last RHS
+        rows, exactly as ``solve_mode(mode, rhs)`` does with its default
+        boundary arguments.
+        """
+        source = np.asarray(rhs)
+        if source.ndim != 2 or source.shape[0] != self.grid.nr:
+            raise ValueError("modal Poisson RHS batch has the wrong shape")
+        self._ensure_near_wall_inverse_rows()
+        inverse_rows = self._near_wall_inverse_rows[:, :, 1:-1]
+        mode_count = inverse_rows.shape[0]
+        dtype = np.result_type(source.dtype, np.float64)
+        interior_source = np.asarray(source[1:-1], dtype=dtype)
+        samples = (
+            inverse_rows.reshape(2 * mode_count, self.grid.nr - 2)
+            @ interior_source
+        )
+        return np.ascontiguousarray(
+            samples.reshape(mode_count, 2, source.shape[1])
+        )
+
     def _ensure_neumann_factors(self) -> None:
         """Build pressure-only Neumann factors lazily on first pressure solve."""
         if self._lu_neumann:

@@ -311,18 +311,13 @@ class ThomWallInfluence:
         source = np.zeros((self.grid.nr, self.grid.ntheta), dtype=float)
         source[1:-1] = -self.h2[1:-1] * response
 
-        mode_count = self.grid.ntheta // 2 + 1
-        modal_curvature = np.empty(
-            (mode_count, self.grid.ntheta),
-            dtype=np.complex128,
+        near_wall = self.poisson.solve_modes_homogeneous_near_wall(source)
+        modal_curvature = -(
+            self._wall_weights[0] * near_wall[:, 0]
+            + self._wall_weights[1] * near_wall[:, 1]
         )
-        for mode in range(mode_count):
-            streamfunction = self.poisson.solve_mode(mode, source)
-            modal_curvature[mode] = -(
-                self._wall_weights[0] * streamfunction[1]
-                + self._wall_weights[1] * streamfunction[2]
-            )
 
+        mode_count = modal_curvature.shape[0]
         modes = np.arange(mode_count, dtype=float)[:, None]
         columns = np.arange(self.grid.ntheta, dtype=float)[None, :]
         basis_phase = np.exp(

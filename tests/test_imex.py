@@ -200,6 +200,45 @@ def test_cached_thom_schur_matches_direct_poisson_response():
     assert max(solver.wall_influence.conditions) < 1e4
 
 
+def test_batched_near_wall_thom_assembly_matches_complete_mode_solves():
+    solver = FlowSolver(SolverConfig(nr=18, ntheta=32, re=200, alpha=7))
+    dt = min(solver.stable_timestep(), 1e-4)
+    solver.radial_implicit.prepare(dt)
+
+    mode_count = solver.config.ntheta // 2 + 1
+    modes = np.arange(mode_count, dtype=float)[:, None]
+    columns = np.arange(solver.config.ntheta, dtype=float)[None, :]
+    basis_phase = np.exp(
+        -2j * np.pi * modes * columns / solver.config.ntheta
+    )
+    for stage in range(3):
+        response = solver.radial_implicit.wall_response(stage)
+        source = np.zeros_like(solver.omega)
+        source[1:-1] = -solver.H2[1:-1] * response
+        old_modal_curvature = np.empty(
+            (mode_count, solver.config.ntheta),
+            dtype=np.complex128,
+        )
+        for mode in range(mode_count):
+            streamfunction = solver.poisson.solve_mode(mode, source)
+            old_modal_curvature[mode] = -(
+                solver.wall_influence._wall_weights[0] * streamfunction[1]
+                + solver.wall_influence._wall_weights[1] * streamfunction[2]
+            )
+        old_closure_response = np.fft.irfft(
+            old_modal_curvature * basis_phase,
+            n=solver.config.ntheta,
+            axis=0,
+        )
+        old_closure_response /= solver.H2[0, :, None]
+        expected = (
+            np.eye(solver.config.ntheta) - old_closure_response.real
+        )
+
+        got = solver.wall_influence._assemble_stage(stage)
+        assert np.allclose(got, expected, rtol=2e-12, atol=2e-12)
+
+
 def test_wall_schur_closes_stages_and_reuses_cached_factors():
     solver = FlowSolver(SolverConfig(nr=40, ntheta=64, re=200, alpha=7))
     dt = min(solver.stable_timestep(), 1e-4)
