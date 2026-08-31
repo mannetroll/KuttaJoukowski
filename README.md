@@ -34,9 +34,11 @@ Consequently the production timestep is no longer set by either the
 `O(Nr^-4)` Chebyshev wall spacing or azimuthal diffusion.  Fourier two-thirds
 dealiasing is supplemented by a smooth Chebyshev-tail filter applied only to
 the nonlinear product.
-Independent cached Poisson and radial LU applications are dispatched as four
-coarse LAPACK worker batches instead of thousands of serial Python calls.  Set
-`JOUKOWSKISIM_LU_WORKERS` to override that default for benchmarking.
+Independent cached LU applications use coarse LAPACK worker batches instead
+of thousands of serial Python calls: eight workers for full modal Poisson
+solves and four for grouped radial solves.  `JOUKOWSKISIM_LU_WORKERS`
+overrides both defaults for benchmarking; `JOUKOWSKISIM_POISSON_LU_WORKERS`
+can override only the modal Poisson pool.
 
 The default circle is centered slightly left of the origin.  Its rightmost
 point is separated from the Joukowski critical point by `te_gap=0.015`, giving

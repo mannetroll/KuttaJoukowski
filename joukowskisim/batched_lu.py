@@ -15,6 +15,18 @@ _WORKERS = max(
     1,
     min(4, int(os.environ.get("JOUKOWSKISIM_LU_WORKERS", _CPU_COUNT))),
 )
+_COLUMN_WORKERS = max(
+    1,
+    min(
+        8,
+        int(
+            os.environ.get(
+                "JOUKOWSKISIM_POISSON_LU_WORKERS",
+                os.environ.get("JOUKOWSKISIM_LU_WORKERS", _CPU_COUNT),
+            )
+        ),
+    ),
+)
 _PARALLEL_COLUMNS = 192
 # A grouped solve has fixed Python/LAPACK dispatch and scatter costs in
 # addition to work proportional to its RHS count.  Production-size (Nr=240)
@@ -24,6 +36,14 @@ _GROUP_CALL_WORK = 32
 _EXECUTOR = (
     ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="joukowski-lu")
     if _WORKERS > 1
+    else None
+)
+_COLUMN_EXECUTOR = (
+    ThreadPoolExecutor(
+        max_workers=_COLUMN_WORKERS,
+        thread_name_prefix="joukowski-poisson-lu",
+    )
+    if _COLUMN_WORKERS > 1
     else None
 )
 
@@ -188,14 +208,14 @@ def solve_cached_columns(
             if not split_complex:
                 out[:, column] = solution
 
-    if _EXECUTOR is None or values.shape[1] < _PARALLEL_COLUMNS:
+    if _COLUMN_EXECUTOR is None or values.shape[1] < _PARALLEL_COLUMNS:
         solve_range((0, values.shape[1]))
     else:
         # Materialize the iterator so worker exceptions are raised here.
         tuple(
-            _EXECUTOR.map(
+            _COLUMN_EXECUTOR.map(
                 solve_range,
-                _column_chunks(values.shape[1], _WORKERS),
+                _column_chunks(values.shape[1], _COLUMN_WORKERS),
             )
         )
     if split_complex:
