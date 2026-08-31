@@ -296,11 +296,11 @@ class FlowSolver:
 
     def _wall_response_from_vorticity(self, omega: np.ndarray) -> np.ndarray:
         """Apply the homogeneous Poisson-plus-Thom wall functional."""
-        near_wall = self.poisson.solve_homogeneous_near_wall(
-            -self.H2 * omega
-        )
         weights = self.wall_influence._wall_weights
-        curvature = weights[0] * near_wall[0] + weights[1] * near_wall[1]
+        curvature = self.poisson.solve_homogeneous_near_wall_functional(
+            -self.H2 * omega,
+            weights,
+        )
         return np.ascontiguousarray(-curvature / self.H2[0])
 
     def _radial_closed_solve(

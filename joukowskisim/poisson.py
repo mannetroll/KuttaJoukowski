@@ -15,6 +15,9 @@ class PoissonSolver:
         self._lu: list[tuple[np.ndarray, np.ndarray]] = []
         self._lu_neumann: list[tuple[np.ndarray, np.ndarray]] = []
         self._near_wall_inverse_rows: np.ndarray | None = None
+        self._near_wall_functional_rows: dict[
+            tuple[float, float], np.ndarray
+        ] = {}
         for kval in grid.kr.astype(int):
             A = grid.Dss.copy()
             A -= (kval * kval) * np.eye(grid.nr)
@@ -70,6 +73,53 @@ class PoissonSolver:
                 samples_hat,
                 n=self.grid.ntheta,
                 axis=-1,
+                workers=-1,
+            )
+        )
+
+    def solve_homogeneous_near_wall_functional(
+        self,
+        rhs: np.ndarray,
+        weights: np.ndarray,
+    ) -> np.ndarray:
+        """Apply a fixed linear functional to homogeneous near-wall rows.
+
+        Combining the two cached inverse rows before the modal contraction is
+        algebraically identical to combining their physical-space solutions,
+        but needs only one radial contraction and one inverse FFT.
+        """
+        source = np.asarray(rhs)
+        if source.shape != (self.grid.nr, self.grid.ntheta):
+            raise ValueError("Poisson RHS has the wrong grid shape")
+        coefficients = np.asarray(weights, dtype=float)
+        if coefficients.shape != (2,):
+            raise ValueError("near-wall functional requires two weights")
+        self._ensure_near_wall_inverse_rows()
+        key = (float(coefficients[0]), float(coefficients[1]))
+        functional_rows = self._near_wall_functional_rows.get(key)
+        if functional_rows is None:
+            functional_rows = np.ascontiguousarray(
+                np.einsum(
+                    "m,kmr->kr",
+                    coefficients,
+                    self._near_wall_inverse_rows,
+                    optimize=False,
+                )
+            )
+            self._near_wall_functional_rows[key] = functional_rows
+
+        transformed = fft.rfft(source, axis=-1, workers=-1)
+        transformed[[0, -1], :] = 0.0
+        samples_hat = np.einsum(
+            "kr,rk->k",
+            functional_rows,
+            transformed,
+            optimize=False,
+        )
+        return np.ascontiguousarray(
+            fft.irfft(
+                samples_hat,
+                n=self.grid.ntheta,
                 workers=-1,
             )
         )

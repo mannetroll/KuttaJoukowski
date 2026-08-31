@@ -47,3 +47,17 @@ def test_batched_modal_near_wall_rows_match_complete_mode_solves():
         assert got.shape == (grid.ntheta // 2 + 1, 2, source.shape[1])
         assert np.iscomplexobj(got) == np.iscomplexobj(source)
         assert np.allclose(got, expected, rtol=8e-13, atol=8e-13)
+
+
+def test_fused_near_wall_functional_matches_two_row_response():
+    grid = SpectralGrid(18, 32, 2.25)
+    poisson = PoissonSolver(grid)
+    rng = np.random.default_rng(621)
+    source = rng.standard_normal((grid.nr, grid.ntheta))
+    weights = np.array([1.75, -0.625])
+
+    rows = poisson.solve_homogeneous_near_wall(source)
+    expected = weights @ rows
+    got = poisson.solve_homogeneous_near_wall_functional(source, weights)
+
+    assert np.allclose(got, expected, rtol=8e-13, atol=8e-13)
