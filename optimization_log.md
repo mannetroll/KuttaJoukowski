@@ -25,3 +25,5 @@
 25 | reconstruct split-complex Poisson output directly in C order | 3.78394e-4 -> 3.69735e-4 (-2.3%) | reverted
 26 | defer compiled grouped-LU C-order conversion to the radial caller | 3.78394e-4 -> 3.75460e-4 (-0.8%) | reverted
 27 | cancel paired signs in the linear wall-response functional | 3.73953e-4 -> 3.91185e-4 (+4.6%) | kept
+28 | replace non-recycling GCROT first pass with one-cycle FGMRES | 3.91185e-4 -> 3.80540e-4 (-2.7%) | reverted
+29 | carry accepted mapped diffusion into the next RK stage | 3.91185e-4 -> 3.88157e-4 (-0.8%) | reverted
