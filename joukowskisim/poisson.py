@@ -108,14 +108,15 @@ class PoissonSolver:
             )
             self._near_wall_functional_rows[key] = functional_rows
 
-        transformed = fft.rfft(source, axis=-1, workers=-1)
-        transformed[[0, -1], :] = 0.0
-        samples_hat = np.einsum(
-            "kr,rk->k",
-            functional_rows,
-            transformed,
-            optimize=False,
+        # Transform the transposed field so each Fourier mode's radial vector
+        # is contiguous.  Both operands of vecdot then stream along their
+        # final axis instead of contracting a strided (radial, mode) layout.
+        transformed = np.ascontiguousarray(
+            fft.rfft(source.T, axis=0, workers=-1)
         )
+        transformed[:, 0] = 0.0
+        transformed[:, -1] = 0.0
+        samples_hat = np.vecdot(functional_rows, transformed, axis=-1)
         return np.ascontiguousarray(
             fft.irfft(
                 samples_hat,

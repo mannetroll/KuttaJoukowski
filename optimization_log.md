@@ -19,3 +19,4 @@
 19 | use a dedicated eight-worker pool for modal Poisson LU solves | 3.35170e-4 -> 3.42349e-4 (+2.1%) | kept
 20 | fuse the cached mapped-diffusion stage-matrix action | 3.42349e-4 -> 3.49759e-4 (+2.2%) | kept
 21 | compile grouped-LU plans and run a fifth partition on the caller | 3.49759e-4 -> 3.56495e-4 (+1.9%) | kept
+22 | transpose wall-functional FFTs for contiguous modal vector dots | 3.56495e-4 -> 3.70465e-4 (+3.9%) | kept

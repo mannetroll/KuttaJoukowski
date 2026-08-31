@@ -61,3 +61,19 @@ def test_fused_near_wall_functional_matches_two_row_response():
     got = poisson.solve_homogeneous_near_wall_functional(source, weights)
 
     assert np.allclose(got, expected, rtol=8e-13, atol=8e-13)
+    cached_rows = poisson._near_wall_functional_rows[tuple(weights)]
+    assert cached_rows.flags.c_contiguous
+
+    source_with_boundary_noise = source.copy()
+    source_with_boundary_noise[[0, -1]] = 1e6 * rng.standard_normal(
+        (2, grid.ntheta)
+    )
+    assert np.allclose(
+        poisson.solve_homogeneous_near_wall_functional(
+            source_with_boundary_noise,
+            weights,
+        ),
+        got,
+        rtol=8e-13,
+        atol=8e-13,
+    )
