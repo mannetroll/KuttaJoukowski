@@ -22,3 +22,5 @@
 22 | transpose wall-functional FFTs for contiguous modal vector dots | 3.56495e-4 -> 3.70465e-4 (+3.9%) | kept
 23 | tune first-pass GCROT tolerance from 5e-7 to 7e-7 | 3.70465e-4 -> 3.70604e-4 (+0.04%) | kept
 24 | skip identically zero beta terms in the first RK stage | 3.70604e-4 -> 3.78394e-4 (+2.1%) | kept
+25 | reconstruct split-complex Poisson output directly in C order | 3.78394e-4 -> 3.69735e-4 (-2.3%) | reverted
+26 | defer compiled grouped-LU C-order conversion to the radial caller | 3.78394e-4 -> 3.75460e-4 (-0.8%) | reverted
