@@ -24,3 +24,4 @@
 24 | skip identically zero beta terms in the first RK stage | 3.70604e-4 -> 3.78394e-4 (+2.1%) | kept
 25 | reconstruct split-complex Poisson output directly in C order | 3.78394e-4 -> 3.69735e-4 (-2.3%) | reverted
 26 | defer compiled grouped-LU C-order conversion to the radial caller | 3.78394e-4 -> 3.75460e-4 (-0.8%) | reverted
+27 | cancel paired signs in the linear wall-response functional | 3.73953e-4 -> 3.91185e-4 (+4.6%) | kept

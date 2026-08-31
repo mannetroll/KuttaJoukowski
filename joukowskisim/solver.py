@@ -305,10 +305,10 @@ class FlowSolver:
         """Apply the homogeneous Poisson-plus-Thom wall functional."""
         weights = self.wall_influence._wall_weights
         curvature = self.poisson.solve_homogeneous_near_wall_functional(
-            -self.H2 * omega,
+            self.H2 * omega,
             weights,
         )
-        return np.ascontiguousarray(-curvature / self.H2[0])
+        return np.ascontiguousarray(curvature / self.H2[0])
 
     def _radial_closed_solve(
         self,
