@@ -40,7 +40,7 @@ class SpectralGrid:
         self.k = fft.fftfreq(self.ntheta, 1.0 / self.ntheta)
         self.kr = fft.rfftfreq(self.ntheta, 1.0 / self.ntheta)
         cutoff = self.ntheta // 3
-        self.dealias_mask = np.abs(self.k) <= cutoff
+        self.dealias_mask = self.kr <= cutoff
         radial_cutoff = 2 * (self.nr - 1) // 3
         radial_mode = np.arange(self.nr)
         radial_eta = np.clip(
@@ -80,9 +80,16 @@ class SpectralGrid:
     def dealias(self, f: np.ndarray) -> np.ndarray:
         """Remove unresolved Fourier modes along the periodic direction."""
         t0 = time.perf_counter()
-        fh = fft.fft(f, axis=-1, workers=-1)
+        fh = fft.rfft(f, axis=-1, workers=-1)
         fh[..., ~self.dealias_mask] = 0
-        out = np.ascontiguousarray(fft.ifft(fh, axis=-1, workers=-1).real)
+        out = np.ascontiguousarray(
+            fft.irfft(
+                fh,
+                n=self.ntheta,
+                axis=-1,
+                workers=-1,
+            )
+        )
         self.fft_time += time.perf_counter() - t0
         return out
 

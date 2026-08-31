@@ -14,3 +14,4 @@
 14 | fuse fixed Thom weights into the modal Poisson contraction | 2.85645e-4 -> 2.87036e-4 (+0.5%) | kept
 15 | warm-start each RK stage from its last converged correction | 2.87036e-4 -> 3.01368e-4 (+5.0%) | kept
 16 | extrapolate each RK-stage correction from its two-step history | 3.01368e-4 -> 3.08901e-4 (+2.5%) | kept
+17 | use real FFTs for nonlinear angular de-aliasing | 3.08901e-4 -> 3.16823e-4 (+2.6%) | kept

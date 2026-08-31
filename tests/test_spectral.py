@@ -31,6 +31,17 @@ def test_dealiasing_removes_high_modes():
     assert np.max(abs(out-low))<1e-12
 
 
+def test_real_dealiasing_matches_full_spectrum_reference():
+    g = SpectralGrid(8, 48, 2)
+    values = np.random.default_rng(2748).standard_normal((5, g.ntheta))
+    transformed = np.fft.fft(values, axis=-1)
+    modes = np.fft.fftfreq(g.ntheta, 1.0 / g.ntheta)
+    transformed[..., np.abs(modes) > g.ntheta // 3] = 0.0
+    expected = np.fft.ifft(transformed, axis=-1).real
+
+    assert np.allclose(g.dealias(values), expected, rtol=2e-14, atol=2e-14)
+
+
 def test_nonlinear_tail_filter_preserves_low_radial_modes_and_filters_tail():
     g = SpectralGrid(18, 48, 2)
     x = 1.0 - 2.0 * g.s / g.s_max
