@@ -346,7 +346,7 @@ class FlowSolver:
         alpha_dt: float,
     ) -> np.ndarray:
         """Apply the exact coupled stage matrix, including wall equations."""
-        out = omega - alpha_dt * self.implicit_diffusion.apply(omega)
+        out = self.implicit_diffusion.apply_stage_matrix(omega, alpha_dt)
         out[0] = omega[0] - self._wall_response_from_vorticity(omega)
         out[-1] = omega[-1]
         return np.ascontiguousarray(out)

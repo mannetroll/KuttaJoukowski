@@ -34,6 +34,7 @@ class MappedImplicitDiffusion:
         self.grid = grid
         self.h2 = np.asarray(h2, dtype=float)
         self.nu = float(nu)
+        self._stage_scales: dict[float, np.ndarray] = {}
 
     def apply(self, field: np.ndarray) -> np.ndarray:
         out = self.nu * (
@@ -41,6 +42,32 @@ class MappedImplicitDiffusion:
             + self.grid.theta_derivative(field, 2)
         ) / self.h2
         out[[0, -1], :] = 0.0
+        return np.ascontiguousarray(out)
+
+    def apply_stage_matrix(
+        self,
+        field: np.ndarray,
+        alpha_dt: float,
+    ) -> np.ndarray:
+        """Apply ``I - alpha_dt L`` with one fused full-grid pipeline."""
+        key = float(alpha_dt)
+        scale = self._stage_scales.get(key)
+        if scale is None:
+            # Normal LS-IMEX operation has three alpha*dt values.  Bound the
+            # cache across adaptive timestep changes without coupling it to
+            # the separate radial-factor lifecycle.
+            if len(self._stage_scales) >= len(LS_IMEX_ALPHA):
+                self._stage_scales.clear()
+            scale = np.ascontiguousarray((-key * self.nu) / self.h2)
+            scale.flags.writeable = False
+            self._stage_scales[key] = scale
+        out = self.grid.Dss @ field
+        out += self.grid.theta_derivative(field, 2)
+        out *= scale
+        out += field
+        # L's boundary rows are zero in ``apply``, so the stage matrix is the
+        # identity there.  The coupled solver replaces the wall row afterward.
+        out[[0, -1], :] = field[[0, -1], :]
         return np.ascontiguousarray(out)
 
 

@@ -321,6 +321,26 @@ def test_full_implicit_apply_matches_mapped_coordinate_laplacian():
     )
 
 
+def test_fused_stage_matrix_matches_separate_diffusion_action():
+    solver = FlowSolver(SolverConfig(nr=16, ntheta=32, re=80))
+    rng = np.random.default_rng(932)
+    field = rng.standard_normal(solver.omega.shape)
+    original = field.copy()
+
+    for alpha_dt in (1e-5, 2e-5, 3e-5, 4e-5):
+        expected = field - alpha_dt * solver.implicit_diffusion.apply(field)
+        got = solver.implicit_diffusion.apply_stage_matrix(field, alpha_dt)
+        assert np.allclose(got, expected, rtol=3e-13, atol=3e-13)
+        assert np.array_equal(got[[0, -1]], field[[0, -1]])
+        assert got.flags.c_contiguous
+        assert len(solver.implicit_diffusion._stage_scales) <= 3
+
+    cached = solver.implicit_diffusion._stage_scales[4e-5]
+    solver.implicit_diffusion.apply_stage_matrix(field, 4e-5)
+    assert solver.implicit_diffusion._stage_scales[4e-5] is cached
+    assert np.array_equal(field, original)
+
+
 def test_fast_wall_poisson_functional_matches_complete_response():
     solver = FlowSolver(SolverConfig(nr=18, ntheta=32, re=100))
     rng = np.random.default_rng(419)
