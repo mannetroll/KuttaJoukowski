@@ -73,6 +73,9 @@ class FlowSolver:
         self._implicit_corrections: list[np.ndarray | None] = [
             None for _ in LS_IMEX_ALPHA
         ]
+        self._previous_implicit_corrections: list[np.ndarray | None] = [
+            None for _ in LS_IMEX_ALPHA
+        ]
         self._velocity_cache: tuple[
             np.ndarray, np.ndarray, np.ndarray, np.ndarray
         ] | None = None
@@ -411,12 +414,20 @@ class FlowSolver:
         if self._implicit_correction_dt != prepared_dt:
             self._implicit_correction_dt = prepared_dt
             self._implicit_corrections = [None for _ in LS_IMEX_ALPHA]
+            self._previous_implicit_corrections = [
+                None for _ in LS_IMEX_ALPHA
+            ]
         cached_correction = self._implicit_corrections[stage]
-        initial = (
-            linear_rhs.ravel().copy()
-            if cached_correction is None
-            else cached_correction.ravel().copy()
-        )
+        previous_correction = self._previous_implicit_corrections[stage]
+        if cached_correction is None:
+            initial = linear_rhs.ravel().copy()
+        else:
+            initial = cached_correction.ravel().copy()
+            if previous_correction is not None:
+                # Linear extrapolation is nearly free and follows the smooth
+                # step-to-step evolution of each fixed-stage correction.
+                initial *= 2.0
+                initial -= previous_correction.ravel()
         solution, info = gcrotmk(
             operator,
             flat_rhs,
@@ -488,6 +499,7 @@ class FlowSolver:
                 "full implicit diffusion residual exceeded tolerance "
                 f"at stage {stage} ({residual:.3e})"
             )
+        self._previous_implicit_corrections[stage] = cached_correction
         self._implicit_corrections[stage] = np.ascontiguousarray(
             solution.reshape(shape)
         ).copy()
