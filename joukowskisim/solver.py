@@ -69,6 +69,10 @@ class FlowSolver:
         self.last_dt_diff_explicit = 0.0; self.last_implicit_residual = 0.0
         self.last_wall_iterations = 0
         self.last_implicit_operator_applications = 0
+        self._implicit_correction_dt: float | None = None
+        self._implicit_corrections: list[np.ndarray | None] = [
+            None for _ in LS_IMEX_ALPHA
+        ]
         self._velocity_cache: tuple[
             np.ndarray, np.ndarray, np.ndarray, np.ndarray
         ] | None = None
@@ -398,12 +402,21 @@ class FlowSolver:
             ).ravel(),
             dtype=float,
         )
-        # Applying the grouped radial/Thom preconditioner only to seed ``x0``
-        # costs one grouped-LU/Poisson solve per stage.  The unpreconditioned
-        # linear RHS is already a close increment for these small IMEX stage
-        # corrections; GCROT still applies the same preconditioner to its
-        # Krylov vectors and the full residual is checked independently.
-        initial = linear_rhs.ravel().copy()
+        # Consecutive corrections for the same RK stage evolve smoothly while
+        # dt (and therefore the implicit matrix) is unchanged.  Reusing the
+        # previous converged correction gives GCROT a closer initial guess at
+        # no operator cost.  A factor/timestep change invalidates all stages;
+        # the exact matrix action and independent residual check are unchanged.
+        prepared_dt = self.radial_implicit._dt
+        if self._implicit_correction_dt != prepared_dt:
+            self._implicit_correction_dt = prepared_dt
+            self._implicit_corrections = [None for _ in LS_IMEX_ALPHA]
+        cached_correction = self._implicit_corrections[stage]
+        initial = (
+            linear_rhs.ravel().copy()
+            if cached_correction is None
+            else cached_correction.ravel().copy()
+        )
         solution, info = gcrotmk(
             operator,
             flat_rhs,
@@ -475,6 +488,9 @@ class FlowSolver:
                 "full implicit diffusion residual exceeded tolerance "
                 f"at stage {stage} ({residual:.3e})"
             )
+        self._implicit_corrections[stage] = np.ascontiguousarray(
+            solution.reshape(shape)
+        ).copy()
         return omega, np.ascontiguousarray(psi), residual, 1, operator_applications
 
     def step(

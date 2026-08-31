@@ -12,3 +12,4 @@
 12 | tune first-pass GCROT tolerance from 3e-7 to 5e-7 | 2.67478e-4 -> 2.73378e-4 (+2.2%) | kept
 13 | solve grouped LU systems in one cached permuted Fortran layout | 2.73378e-4 -> 2.85645e-4 (+4.5%) | kept
 14 | fuse fixed Thom weights into the modal Poisson contraction | 2.85645e-4 -> 2.87036e-4 (+0.5%) | kept
+15 | warm-start each RK stage from its last converged correction | 2.87036e-4 -> 3.01368e-4 (+5.0%) | kept
