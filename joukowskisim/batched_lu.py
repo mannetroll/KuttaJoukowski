@@ -124,6 +124,118 @@ def _group_layout(
     return permutation, inverse, offsets
 
 
+class GroupedRealLUPlan:
+    """Compiled application plan for one set of grouped real LU factors.
+
+    The radial IMEX preconditioner applies the same stage factors hundreds of
+    times between timestep-cache rebuilds.  Resolve its permutation, LAPACK
+    function, factor lookups, and balanced task partition once.  At production
+    widths the persistent worker pool handles one partition per worker while
+    the calling thread handles one additional partition instead of waiting
+    idle for all grouped solves to finish.
+
+    This specialized plan accepts real right-hand sides and real LU factors.
+    :func:`solve_cached_groups` remains the generic entry point for serial,
+    complex-factor, and split-complex uses.
+    """
+
+    def __init__(
+        self,
+        factors: list[tuple[np.ndarray, np.ndarray]],
+        column_groups: tuple[tuple[int, ...], ...],
+    ):
+        if not factors or len(factors) != len(column_groups):
+            raise ValueError("cached LU groups have the wrong shape")
+        if np.iscomplexobj(factors[0][0]):
+            raise ValueError("compiled grouped LU factors must be real")
+
+        permutation, inverse, offsets = _group_layout(column_groups)
+        if _EXECUTOR is None or permutation.size < _PARALLEL_COLUMNS:
+            group_tasks = (tuple(range(len(column_groups))),)
+        else:
+            # Keep one task for every persistent worker and one for the
+            # calling thread.  The caller formerly waited idle in map().
+            group_tasks = _balanced_group_tasks(
+                column_groups,
+                _WORKERS + 1,
+            )
+
+        self._permutation = permutation
+        self._inverse = inverse
+        self._factor_dtype = factors[0][0].dtype
+        self._getrs = linalg.lapack.get_lapack_funcs(
+            "getrs",
+            (factors[0][0],),
+        )
+        self._job_tasks = tuple(
+            tuple(
+                (
+                    factors[group_index][0],
+                    factors[group_index][1],
+                    int(offsets[group_index]),
+                    int(offsets[group_index + 1]),
+                )
+                for group_index in group_indices
+            )
+            for group_indices in group_tasks
+        )
+
+    def solve(self, rhs: np.ndarray) -> np.ndarray:
+        """Apply the compiled factors without mutating ``rhs``."""
+        values = np.asarray(rhs)
+        if (
+            values.ndim != 2
+            or values.shape[1] != self._permutation.size
+            or np.iscomplexobj(values)
+        ):
+            raise ValueError(
+                "compiled grouped LU right-hand side must be a real "
+                "matrix with the planned column count"
+            )
+
+        ordered = np.asfortranarray(
+            values[:, self._permutation],
+            dtype=np.result_type(values.dtype, self._factor_dtype),
+        )
+
+        def solve_task(jobs) -> None:
+            for lu, pivots, start, stop in jobs:
+                _, info = self._getrs(
+                    lu,
+                    pivots,
+                    ordered[:, start:stop],
+                    trans=0,
+                    overwrite_b=True,
+                )
+                if info != 0:
+                    raise RuntimeError(
+                        "cached LAPACK solve failed in compiled group "
+                        f"[{start}:{stop}] with info={info}"
+                    )
+
+        if len(self._job_tasks) == 1:
+            solve_task(self._job_tasks[0])
+        else:
+            # There are at most _WORKERS submitted tasks; the final balanced
+            # partition runs concurrently on the calling thread.  Await every
+            # future so worker failures are propagated before returning.
+            futures = tuple(
+                _EXECUTOR.submit(solve_task, jobs)
+                for jobs in self._job_tasks[:-1]
+            )
+            caller_error = None
+            try:
+                solve_task(self._job_tasks[-1])
+            except Exception as error:  # Preserve it after joining workers.
+                caller_error = error
+            for future in futures:
+                future.result()
+            if caller_error is not None:
+                raise caller_error
+
+        return np.ascontiguousarray(ordered[:, self._inverse])
+
+
 def solve_cached_columns(
     factors: list[tuple[np.ndarray, np.ndarray]],
     rhs: np.ndarray,

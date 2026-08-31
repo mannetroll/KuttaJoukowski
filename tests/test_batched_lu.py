@@ -2,7 +2,11 @@ import numpy as np
 from scipy import linalg
 
 from joukowskisim.batched_lu import (
+    _EXECUTOR,
     _GROUP_CALL_WORK,
+    _PARALLEL_COLUMNS,
+    _WORKERS,
+    GroupedRealLUPlan,
     _balanced_group_tasks,
     solve_cached_columns,
     solve_cached_groups,
@@ -149,6 +153,49 @@ def test_grouped_cached_lu_matches_individual_solves_without_mutating_rhs():
 
     assert np.array_equal(got, expected)
     assert np.array_equal(rhs, original)
+
+
+def test_compiled_grouped_real_plan_matches_generic_and_partitions_jobs():
+    count, size = 200, 6
+    groups = tuple((column, count - 1 - column) for column in range(count // 2))
+    factors = _factors(len(groups), size)
+    rhs = np.random.default_rng(5772).standard_normal((size, count))
+    original = rhs.copy()
+
+    plan = GroupedRealLUPlan(factors, groups)
+    expected = solve_cached_groups(factors, groups, rhs)
+    got = plan.solve(rhs)
+
+    assert np.array_equal(got, expected)
+    assert np.array_equal(rhs, original)
+    intervals = sorted(
+        (start, stop)
+        for task in plan._job_tasks
+        for _, _, start, stop in task
+    )
+    assert intervals == [
+        (2 * group_index, 2 * group_index + 2)
+        for group_index in range(len(groups))
+    ]
+    expected_task_count = (
+        min(_WORKERS + 1, len(groups))
+        if _EXECUTOR is not None and count >= _PARALLEL_COLUMNS
+        else 1
+    )
+    assert len(plan._job_tasks) == expected_task_count
+
+
+def test_compiled_grouped_real_plan_preserves_small_serial_path():
+    groups = ((0, 7, 3), (1,), (2, 6), (4, 5))
+    factors = _factors(len(groups), 7)
+    rhs = np.random.default_rng(2728).standard_normal((7, 8))
+    plan = GroupedRealLUPlan(factors, groups)
+
+    assert len(plan._job_tasks) == 1
+    assert np.array_equal(
+        plan.solve(rhs),
+        solve_cached_groups(factors, groups, rhs),
+    )
 
 
 def test_grouped_cached_lu_supports_mixed_group_sizes_and_c_order_rhs():

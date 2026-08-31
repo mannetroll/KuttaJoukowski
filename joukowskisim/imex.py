@@ -6,7 +6,7 @@ import time
 import numpy as np
 from scipy import fft, linalg
 
-from .batched_lu import solve_cached_groups
+from .batched_lu import GroupedRealLUPlan
 
 
 # Spalart/Moser/Rogers low-storage coefficients, matching the reference
@@ -99,6 +99,7 @@ class RadialImplicitDiffusion:
         self._identity = np.eye(grid.nr - 2)
         self._dt: float | None = None
         self._factors: list[list[tuple[np.ndarray, np.ndarray]]] = []
+        self._solve_plans: list[GroupedRealLUPlan] = []
         self._wall_responses: list[np.ndarray] = []
         self.factorizations = 0
         self.factor_seconds = 0.0
@@ -199,9 +200,11 @@ class RadialImplicitDiffusion:
         # Drop the old O(Ngroup*Nr^2) cache before constructing its replacement
         # so an adaptive-dt rebuild does not require roughly twice the memory.
         self._factors = []
+        self._solve_plans = []
         self._wall_responses = []
         self._dt = None
         factors: list[list[tuple[np.ndarray, np.ndarray]]] = []
+        solve_plans: list[GroupedRealLUPlan] = []
         wall_responses: list[np.ndarray] = []
         for alpha in LS_IMEX_ALPHA:
             stage_factors = []
@@ -225,8 +228,12 @@ class RadialImplicitDiffusion:
                     check_finite=False,
                 )
             factors.append(stage_factors)
+            solve_plans.append(
+                GroupedRealLUPlan(stage_factors, self._factor_groups)
+            )
             wall_responses.append(np.ascontiguousarray(response))
         self._factors = factors
+        self._solve_plans = solve_plans
         self._wall_responses = wall_responses
         self._dt = dt
         self.factorizations += 1
@@ -280,11 +287,7 @@ class RadialImplicitDiffusion:
                 rhs[1:-1]
                 + alpha_dt * self._coefficient * boundary_second_derivative
             )
-        interior = solve_cached_groups(
-            self._factors[stage],
-            self._factor_groups,
-            interior_rhs,
-        )
+        interior = self._solve_plans[stage].solve(interior_rhs)
         out = np.empty_like(rhs)
         out[0] = wall
         out[1:-1] = interior

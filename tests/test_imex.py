@@ -149,6 +149,14 @@ def test_radial_preconditioner_groups_are_bounded_and_reduce_factor_count():
         len(factors) == len(symmetric.radial_implicit._factor_groups)
         for factors in symmetric.radial_implicit._factors
     )
+    assert len(symmetric.radial_implicit._solve_plans) == len(LS_IMEX_ALPHA)
+    plan_ids = tuple(
+        id(plan) for plan in symmetric.radial_implicit._solve_plans
+    )
+    symmetric.radial_implicit.prepare(dt)
+    assert tuple(
+        id(plan) for plan in symmetric.radial_implicit._solve_plans
+    ) == plan_ids
 
     rng = np.random.default_rng(2718)
     rhs = rng.standard_normal(symmetric.omega.shape)
