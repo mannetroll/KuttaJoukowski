@@ -216,7 +216,9 @@ class FlowSolver:
         t0 = time.perf_counter()
         ps = self.grid.s_derivative(psi); pt = self.grid.theta_derivative(psi)
         ws = self.grid.s_derivative(omega); wt = self.grid.theta_derivative(omega)
-        out = self.grid.dealias_nonlinear((ps * wt - pt * ws) / self.H2)
+        # u = (psi_theta e_s - psi_s e_theta) / H, hence
+        # u dot grad(omega) = (psi_theta omega_s - psi_s omega_theta) / H^2.
+        out = self.grid.dealias_nonlinear((pt * ws - ps * wt) / self.H2)
         self.timing["nonlinear"] += time.perf_counter() - t0
         return out
 

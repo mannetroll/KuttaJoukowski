@@ -19,6 +19,18 @@ def test_uniform_flow_velocity_recovery_and_incompressibility(small_solver):
     assert np.max(abs(divergence(u,v,s.grid,s.mapping)[2:-2]))<2e-7
 
 
+def test_nonlinear_term_advects_vorticity_with_recovered_velocity(small_solver):
+    # For psi=y, the recovered velocity is (u,v)=(1,0).  With omega=x,
+    # u dot grad(omega) must therefore be +1, so the evolution RHS uses -1.
+    s=small_solver
+    advection=s.nonlinear_term(s.x,s.y)
+    core=np.s_[2:-3,:]
+    np.testing.assert_allclose(advection[core],1.0,rtol=1e-8,atol=1e-8)
+    evolution=s._explicit_rhs(s.x,s.y)
+    no_sponge=(s.S>0.0)&(s.S<0.8*s.mapping.s_max)
+    np.testing.assert_allclose(evolution[no_sponge],-1.0,rtol=1e-8,atol=1e-8)
+
+
 def test_wall_impermeability_and_no_slip_relation(small_solver):
     s=small_solver; S=s.S
     psi=s.wall_psi_target + S**2*np.sin(s.T)
