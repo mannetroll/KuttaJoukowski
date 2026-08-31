@@ -76,6 +76,34 @@ def _balanced_group_tasks(
     return tuple(tuple(assignment) for assignment in assignments)
 
 
+@lru_cache(maxsize=32)
+def _group_layout(
+    column_groups: tuple[tuple[int, ...], ...],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cache grouped column order, its inverse, and group boundaries."""
+    columns = tuple(column for group in column_groups for column in group)
+    if (
+        any(not group for group in column_groups)
+        or tuple(sorted(columns)) != tuple(range(len(columns)))
+    ):
+        raise ValueError("cached LU groups must partition the RHS columns")
+    permutation = np.fromiter(columns, dtype=np.intp, count=len(columns))
+    inverse = np.argsort(permutation)
+    offsets = np.empty(len(column_groups) + 1, dtype=np.intp)
+    offsets[0] = 0
+    np.cumsum(
+        np.fromiter(
+            (len(group) for group in column_groups),
+            dtype=np.intp,
+            count=len(column_groups),
+        ),
+        out=offsets[1:],
+    )
+    for layout in (permutation, inverse, offsets):
+        layout.flags.writeable = False
+    return permutation, inverse, offsets
+
+
 def solve_cached_columns(
     factors: list[tuple[np.ndarray, np.ndarray]],
     rhs: np.ndarray,
@@ -198,12 +226,8 @@ def solve_cached_groups(
             raise ValueError("cached LU groups do not cover the RHS columns")
         return np.empty_like(values)
 
-    columns = tuple(column for group in column_groups for column in group)
-    if (
-        any(not group for group in column_groups)
-        or len(columns) != values.shape[1]
-        or tuple(sorted(columns)) != tuple(range(values.shape[1]))
-    ):
+    permutation, inverse, offsets = _group_layout(column_groups)
+    if permutation.size != values.shape[1]:
         raise ValueError("cached LU groups must partition the RHS columns")
 
     split_complex = (
@@ -214,41 +238,23 @@ def solve_cached_groups(
         "getrs",
         (factors[0][0],) if split_complex else (factors[0][0], values),
     )
-    out = np.empty(
-        values.shape,
-        dtype=np.result_type(values.dtype, factors[0][0].dtype),
-    )
+    out_dtype = np.result_type(values.dtype, factors[0][0].dtype)
     if _EXECUTOR is None or values.shape[1] < _PARALLEL_COLUMNS:
         group_tasks = (tuple(range(len(column_groups))),)
     else:
         group_tasks = _balanced_group_tasks(column_groups, _WORKERS)
-    # Real-valued stages dominate the mapped implicit preconditioner.  Give
-    # each parallel task one reusable C-order scratch slab; transposing a
-    # populated (group, rows) slice gives LAPACK the F-contiguous
-    # (rows, group) multi-RHS matrix it expects.  This avoids allocating and
-    # freeing one temporary array for every group while keeping worker writes
-    # disjoint.  The split-complex path retains its paired real/imag layout.
-    real_workspace = (
+    # Real-valued stages dominate the mapped implicit preconditioner.  Gather
+    # all groups once into adjacent columns of one Fortran-order array.  Each
+    # LAPACK call can then overwrite a direct disjoint slice, avoiding the
+    # per-column Python gather/scatter loops formerly paid for every group.
+    ordered = (
         None
         if split_complex
-        else np.empty(
-            (
-                len(group_tasks),
-                max(len(group) for group in column_groups),
-                values.shape[0],
-            ),
-            dtype=out.dtype,
-            order="C",
-        )
+        else np.asfortranarray(values[:, permutation], dtype=out_dtype)
     )
+    out = None if not split_complex else np.empty(values.shape, dtype=out_dtype)
 
-    def solve_task(task: tuple[int, tuple[int, ...]]) -> None:
-        workspace_index, group_indices = task
-        scratch = (
-            None
-            if real_workspace is None
-            else real_workspace[workspace_index]
-        )
+    def solve_task(group_indices: tuple[int, ...]) -> None:
         for group_index in group_indices:
             group = column_groups[group_index]
             lu, pivots = factors[group_index]
@@ -274,29 +280,26 @@ def solve_cached_groups(
                         + 1j * solution[:, group_size:]
                     )
             else:
-                group_size = len(group)
-                for local_column, source_column in enumerate(group):
-                    scratch[local_column] = values[:, source_column]
-                solution, info = getrs(
+                start = int(offsets[group_index])
+                stop = int(offsets[group_index + 1])
+                _, info = getrs(
                     lu,
                     pivots,
-                    scratch[:group_size].T,
+                    ordered[:, start:stop],
                     trans=0,
                     overwrite_b=True,
                 )
-                if info == 0:
-                    for local_column, destination_column in enumerate(group):
-                        out[:, destination_column] = solution[:, local_column]
             if info != 0:
                 raise RuntimeError(
                     f"cached LAPACK solve failed in group {group_index} "
                     f"with info={info}"
                 )
 
-    tasks = tuple(enumerate(group_tasks))
-    if len(tasks) == 1:
-        solve_task(tasks[0])
+    if len(group_tasks) == 1:
+        solve_task(group_tasks[0])
     else:
         # Materialize the iterator so worker exceptions are raised here.
-        tuple(_EXECUTOR.map(solve_task, tasks))
-    return np.ascontiguousarray(out)
+        tuple(_EXECUTOR.map(solve_task, group_tasks))
+    if split_complex:
+        return np.ascontiguousarray(out)
+    return np.ascontiguousarray(ordered[:, inverse])

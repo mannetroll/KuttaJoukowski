@@ -10,3 +10,4 @@
 10 | assemble Thom response from cached exact near-wall inverse rows | 2.12981e-4 -> 2.58616e-4 (+21.4%) | kept
 11 | balance variable-size LU groups across workers | 2.58616e-4 -> 2.67478e-4 (+3.4%) | kept
 12 | tune first-pass GCROT tolerance from 3e-7 to 5e-7 | 2.67478e-4 -> 2.73378e-4 (+2.2%) | kept
+13 | solve grouped LU systems in one cached permuted Fortran layout | 2.73378e-4 -> 2.85645e-4 (+4.5%) | kept
