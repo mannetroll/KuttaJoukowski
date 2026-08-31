@@ -537,12 +537,17 @@ class FlowSolver:
         for stage, (alpha, beta) in enumerate(zip(LS_IMEX_ALPHA, LS_IMEX_BETA)):
             explicit = self._explicit_rhs(omega, psi)
             implicit_started = time.perf_counter()
-            stage_rhs = (
-                omega
-                + beta * dt * self.implicit_diffusion.apply(omega)
-                + alpha * dt * explicit
-                + beta * dt * previous_explicit
-            )
+            if beta == 0.0:
+                # The first LS-IMEX stage has no beta contribution.  Avoid a
+                # complete mapped-diffusion evaluation and two zero terms.
+                stage_rhs = omega + alpha * dt * explicit
+            else:
+                stage_rhs = (
+                    omega
+                    + beta * dt * self.implicit_diffusion.apply(omega)
+                    + alpha * dt * explicit
+                    + beta * dt * previous_explicit
+                )
             omega, psi, residual, wall_iterations, operator_applications = self._implicit_stage(
                 stage_rhs,
                 stage,
