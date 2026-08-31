@@ -238,14 +238,21 @@ class RadialImplicitDiffusion:
             outer = np.zeros_like(wall)
         else:
             outer = np.asarray(outer, dtype=float)
-        boundary_second_derivative = (
-            self._wall_column[:, None] * wall[None, :]
-            + self._outer_column[:, None] * outer[None, :]
-        )
-        interior_rhs = np.ascontiguousarray(
-            rhs[1:-1]
-            + alpha_dt * self._coefficient * boundary_second_derivative
-        )
+        if not np.any(wall) and not np.any(outer):
+            # Krylov preconditioner applications have homogeneous radial
+            # boundaries.  The grouped solve copies into its packed LAPACK
+            # workspace, so this view is safe and avoids constructing two
+            # full-grid zero forcing temporaries on every application.
+            interior_rhs = rhs[1:-1]
+        else:
+            boundary_second_derivative = (
+                self._wall_column[:, None] * wall[None, :]
+                + self._outer_column[:, None] * outer[None, :]
+            )
+            interior_rhs = np.ascontiguousarray(
+                rhs[1:-1]
+                + alpha_dt * self._coefficient * boundary_second_derivative
+            )
         interior = solve_cached_groups(
             self._factors[stage],
             self._factor_groups,

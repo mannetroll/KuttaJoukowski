@@ -15,3 +15,4 @@
 15 | warm-start each RK stage from its last converged correction | 2.87036e-4 -> 3.01368e-4 (+5.0%) | kept
 16 | extrapolate each RK-stage correction from its two-step history | 3.01368e-4 -> 3.08901e-4 (+2.5%) | kept
 17 | use real FFTs for nonlinear angular de-aliasing | 3.08901e-4 -> 3.16823e-4 (+2.6%) | kept
+18 | bypass zero radial-boundary forcing in Krylov preconditioning | 3.16823e-4 -> 3.35170e-4 (+5.8%) | kept
